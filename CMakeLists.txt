@@ -9,57 +9,18 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE RelWithDebInfo)
 endif()
 
-option(BT_STATIC "Link third-party libraries statically" ON)
-option(BT_BUILD_TESTS "Build unit tests" ON)
-option(BT_WITH_NET "Build the QUIC/gRPC/RPC node (needs OpenSSL>=3.5, ngtcp2, nghttp2, libevent)" ON)
-set(BT_DEPENDS_PREFIX "" CACHE PATH "Prefix with our pinned third-party builds (depends/)")
-if(BT_DEPENDS_PREFIX)
-  list(PREPEND CMAKE_PREFIX_PATH "${BT_DEPENDS_PREFIX}")
-  list(PREPEND CMAKE_FIND_ROOT_PATH "${BT_DEPENDS_PREFIX}")
+# The shared engine (git submodule ../backbone-core at core/): defines the BT_* options,
+# finds the dependencies (core/depends/built/<host> when present) and the targets
+# bt_core, bt_net, bt_test_harness and bt_core_test_cases. It also sets
+# -ffp-contract=off for every consumer of bt_core (consensus f64 math).
+if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/core/CMakeLists.txt")
+  message(FATAL_ERROR "core/ is empty: run `git submodule update --init`")
 endif()
+add_subdirectory(core)
 
-# Consensus code must not use contracted floating point (fma) anywhere: the f64 block
-# limits must equal Rust's non-fused results.
-add_compile_options(-Wall -Wextra -Wno-unused-parameter $<$<COMPILE_LANGUAGE:C,CXX>:-ffp-contract=off>)
-
-find_package(PkgConfig REQUIRED)
-find_package(Threads REQUIRED)
-if(NOT BT_DEPENDS_PREFIX AND EXISTS "${CMAKE_SOURCE_DIR}/depends/built/linux" AND NOT CMAKE_CROSSCOMPILING)
-  set(BT_DEPENDS_PREFIX "${CMAKE_SOURCE_DIR}/depends/built/linux")
-  list(PREPEND CMAKE_PREFIX_PATH "${BT_DEPENDS_PREFIX}")
-endif()
-if(BT_STATIC)
-  set(_pc_static_flag STATIC)
-endif()
-pkg_check_modules(SODIUM REQUIRED IMPORTED_TARGET libsodium)
-pkg_check_modules(SQLITE REQUIRED IMPORTED_TARGET sqlite3)
-
-# ---------------------------------------------------------------- third party
-add_library(bt_blake3 STATIC
-  third_party/blake3/blake3.c
-  third_party/blake3/blake3_dispatch.c
-  third_party/blake3/blake3_portable.c)
-target_include_directories(bt_blake3 PUBLIC third_party/blake3)
-target_compile_definitions(bt_blake3 PRIVATE BLAKE3_NO_SSE2 BLAKE3_NO_SSE41 BLAKE3_NO_AVX2 BLAKE3_NO_AVX512 BLAKE3_USE_NEON=0)
-
-add_library(bt_univalue STATIC
-  third_party/univalue/lib/univalue.cpp
-  third_party/univalue/lib/univalue_get.cpp
-  third_party/univalue/lib/univalue_read.cpp
-  third_party/univalue/lib/univalue_write.cpp)
-target_include_directories(bt_univalue PUBLIC third_party/univalue/include)
-target_compile_options(bt_univalue PRIVATE -w)
-
-# ---------------------------------------------------------------- core
-add_subdirectory(libs/core)
 add_subdirectory(chains/thunder)
 
 if(BT_BUILD_TESTS)
   enable_testing()
   add_subdirectory(tests)
-endif()
-
-if(BT_WITH_NET)
-  add_executable(bt-enforcer-probe tools/enforcer_probe.cpp)
-  target_link_libraries(bt-enforcer-probe PRIVATE bt_net)
 endif()

@@ -10,21 +10,20 @@ BitAssets, zSide, Truthcoin), built to be a **drop-in replacement client**: same
 ## Layout
 
 ```
-libs/core/          libbt_core  - consensus-neutral building blocks shared by all five chains
-                    libbt_net   - QUIC, gRPC, enforcer client (the only part that links TLS)
+core/               git submodule ../backbone-core: libbt_core, libbt_net, test harness,
+                    depends/, third_party/, cmake/, bt-enforcer-probe (see core/doc/DESIGN.md)
 chains/thunder/     libthunder_core (rules: types, merkle, state machine, archive, P2P msgs, JSON)
                     libthunder_node (node, wallet, app/RPC), binaries thunder, thunder-cli,
                     thunder-fetch-blocks
-tests/              unit + known-answer tests; tests/data/betanet = public betanet data
-depends/            pinned, hash-checked third-party builds (OpenSSL 3.5.9, ngtcp2 1.25.0)
-third_party/        vendored BLAKE3 C (CC0/Apache-2.0) and UniValue (MIT)
-tools/              bt-enforcer-probe
+tests/              Thunder unit + known-answer tests (tests/data/betanet = public betanet
+                    data); the test binary also runs the core's own cases
 ```
 
-`libs/core` knows nothing about a particular chain. A chain module (`chains/<name>`) defines
+The core knows nothing about a particular chain. A chain module (`chains/<name>`) defines
 its types, encodings, merkle variant, Utreexo on/off, state machine and RPC; the other four
-chains are new directories next to `chains/thunder` reusing the core (study §1: the five are
-"backport-thunder-x.y" descendants that differ in tx fields, merkle variant, Utreexo and magic).
+chains live in their own repositories (`backbone-bitnames`, ...) with the same `core/`
+submodule (study §1: the five are "backport-thunder-x.y" descendants that differ in tx
+fields, merkle variant, Utreexo and magic).
 
 | Core module | What it is | Exactness reference |
 |---|---|---|
