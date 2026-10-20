@@ -58,3 +58,8 @@ if(BT_BUILD_TESTS)
   enable_testing()
   add_subdirectory(tests)
 endif()
+
+if(BT_WITH_NET)
+  add_executable(bt-enforcer-probe tools/enforcer_probe.cpp)
+  target_link_libraries(bt-enforcer-probe PRIVATE bt_net)
+endif()

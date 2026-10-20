@@ -7,7 +7,8 @@ add_library(bt_core STATIC
   src/frost.cpp
   src/utreexo.cpp
   src/kv.cpp
-  src/mainchain.cpp)
+  src/mainchain.cpp
+  src/protobuf.cpp)
 target_include_directories(bt_core PUBLIC include)
 target_link_libraries(bt_core PUBLIC bt_blake3 bt_univalue PkgConfig::SODIUM PkgConfig::SQLITE)
 
@@ -22,10 +23,11 @@ if(BT_WITH_NET)
     set(OPENSSL_ROOT_DIR ${BT_DEPENDS_PREFIX})
   endif()
   find_package(OpenSSL 3.5 REQUIRED)
-  add_library(bt_net STATIC src/quic.cpp)
+  pkg_check_modules(NGHTTP2 REQUIRED IMPORTED_TARGET libnghttp2)
+  add_library(bt_net STATIC src/quic.cpp src/grpc.cpp src/enforcer.cpp)
   target_include_directories(bt_net PUBLIC include ${NGTCP2_INCLUDE})
   target_compile_definitions(bt_net PRIVATE NGTCP2_STATICLIB)
-  target_link_libraries(bt_net PUBLIC bt_core ${NGTCP2_CRYPTO_LIB} ${NGTCP2_LIB} OpenSSL::SSL OpenSSL::Crypto Threads::Threads ${CMAKE_DL_LIBS})
+  target_link_libraries(bt_net PUBLIC bt_core ${NGTCP2_CRYPTO_LIB} ${NGTCP2_LIB} PkgConfig::NGHTTP2 OpenSSL::SSL OpenSSL::Crypto Threads::Threads ${CMAKE_DL_LIBS})
   if(WIN32)
     target_link_libraries(bt_net PUBLIC ws2_32 crypt32)
   endif()
