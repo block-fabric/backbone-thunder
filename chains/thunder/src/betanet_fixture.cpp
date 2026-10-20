@@ -4,6 +4,8 @@
 
 #include <thunder/betanet_fixture.h>
 
+#include <algorithm>
+#include <cstring>
 #include <fstream>
 #include <sstream>
 
@@ -234,6 +236,90 @@ ReplayResult replay(const Data& d, State& st, bt::kv::Store& store, uint32_t max
         txn.commit();
         prev_main_height = ib.main_height;
         res.replayed_to = height;
+    }
+    return res;
+}
+
+std::vector<std::pair<uint32_t, Bytes>> load_blocks_bin(const std::string& path)
+{
+    std::vector<std::pair<uint32_t, Bytes>> r;
+    std::string all = slurp(path);
+    size_t p = 0;
+    while (p + 8 <= all.size()) {
+        uint32_t h, n;
+        std::memcpy(&h, all.data() + p, 4);
+        std::memcpy(&n, all.data() + p + 4, 4);
+        p += 8;
+        if (p + n > all.size()) break;
+        r.emplace_back(h, Bytes(all.begin() + p, all.begin() + p + n));
+        p += n;
+    }
+    std::stable_sort(r.begin(), r.end(), [](auto& a, auto& b) { return a.first < b.first; });
+    r.erase(std::unique(r.begin(), r.end(), [](auto& a, auto& b) { return a.first == b.first; }), r.end());
+    return r;
+}
+
+FullReplayResult replay_full(const Data& d, const std::vector<std::pair<uint32_t, Bytes>>& blocks, State& st, bt::kv::Store& store)
+{
+    FullReplayResult res;
+    std::optional<uint32_t> prev_main_height;
+    std::map<Hash32, uint32_t> bmm_at; // commitment -> mainchain height (first seen)
+    for (auto& [h, mb] : d.main_by_height)
+        if (mb.info.bmm_commitment) bmm_at.emplace(*mb.info.bmm_commitment, h);
+    uint32_t expect = 0;
+    for (auto& [height, raw] : blocks) {
+        if (height != expect) { res.error = "non-contiguous block file at " + std::to_string(height); return res; }
+        expect++;
+        Block b;
+        try {
+            Reader r(raw);
+            if (r.u32() != 0) { res.error = "not a Block response at " + std::to_string(height); return res; }
+            b.header = de_header(r);
+            b.body = de_body(r);
+            if (!r.empty()) { res.error = "trailing bytes at " + std::to_string(height); return res; }
+        } catch (const std::exception& e) {
+            res.error = "decode at " + std::to_string(height) + ": " + e.what();
+            return res;
+        }
+        Writer w;
+        w.u32(0); // ResponseMessage::Block
+        bincode(w, b);
+        if (w.buf == raw) res.reencoded_exact++;
+        Hash32 id = b.header.hash();
+        Hash32 index_id = height == 0 ? *d.blocks[1].prev : d.blocks[height].id;
+        if (id != index_id) { res.error = "hash mismatch at " + std::to_string(height); return res; }
+        res.hashes_match_index++;
+        // BMM (archive/mod.rs:886-1015): the commitment to this header sits in the child of
+        // prev_main_hash; the child's height minus one is prev_main's height.
+        auto bh = bmm_at.find(id);
+        if (bh == bmm_at.end()) { res.error = "no BMM commitment for height " + std::to_string(height); return res; }
+        const MainBlock& bmm = d.main_by_height.at(bh->second);
+        if (bmm.header.prev_block_hash != b.header.prev_main_hash) { res.error = "BMM block not a child of prev_main at " + std::to_string(height); return res; }
+        res.bmm_verified++;
+        uint32_t main_height = bh->second - 1;
+        bt::kv::Txn txn(store);
+        try {
+            auto pre = st.prevalidate(txn, b.header, b.body); // every check enabled
+            res.signatures += uint32_t(b.body.authorizations.size());
+            for (auto& t : b.body.transactions)
+                if (!t.proof.targets.empty()) res.proofs++;
+            st.connect_prevalidated(txn, b.header, b.body, pre);
+            TwoWayPegData win;
+            for (auto& [h, mb] : d.main_by_height) {
+                if (h > main_height) break;
+                if (prev_main_height && h <= *prev_main_height) continue;
+                for (auto& ev : mb.info.events)
+                    if (std::holds_alternative<bt::mainchain::Deposit>(ev)) res.deposits++;
+                win.block_info.emplace_back(mb.header.block_hash, mb.info);
+            }
+            st.connect_2wpd(txn, win);
+        } catch (const StateError& e) {
+            res.error = "height " + std::to_string(height) + ": " + e.what();
+            return res;
+        }
+        txn.commit();
+        prev_main_height = main_height;
+        res.blocks++;
     }
     return res;
 }

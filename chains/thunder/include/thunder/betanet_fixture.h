@@ -61,4 +61,21 @@ struct ReplayResult {
 /** Replay from genesis; stops at the first block it cannot rebuild exactly. */
 ReplayResult replay(const Data& d, State& st, bt::kv::Store& store, uint32_t max_height = UINT32_MAX);
 
+/** Full blocks as fetched from public peers (thunder-fetch-blocks: u32 height, u32 len,
+ *  bincode(ResponseMessage::Block)). */
+std::vector<std::pair<uint32_t, Bytes>> load_blocks_bin(const std::string& path);
+
+struct FullReplayResult {
+    uint32_t blocks = 0;            // connected with every consensus check enabled
+    uint32_t reencoded_exact = 0;   // bincode re-encoding identical to the bytes received
+    uint32_t hashes_match_index = 0;
+    uint32_t signatures = 0;        // FROST signatures verified
+    uint32_t proofs = 0;            // non-empty Utreexo proofs verified
+    uint32_t bmm_verified = 0;
+    uint32_t deposits = 0;
+    std::string error;
+};
+/** Replay real blocks with all checks (signatures, Utreexo proofs and roots, merkle, BMM). */
+FullReplayResult replay_full(const Data& d, const std::vector<std::pair<uint32_t, Bytes>>& blocks, State& st, bt::kv::Store& store);
+
 } // namespace thunder::fixture
