@@ -11,6 +11,7 @@ Inspired by Thunder by LayerTwo Labs.
 ## Build (Linux)
 
 ```
+depends/fetch.sh
 cmake -S depends -B depends/work/linux                 # OpenSSL 3.5.9 + ngtcp2 1.25.0
 ~/skydoge/tools/build.sh ~/skydoge/backbone-thunder depends/work/linux
 cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo   # system libsodium, sqlite3, nghttp2
