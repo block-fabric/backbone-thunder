@@ -1,0 +1,5 @@
+/build*/
+/depends/built/
+/depends/sources/
+/depends/work/
+*.swp

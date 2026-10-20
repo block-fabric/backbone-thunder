@@ -1,0 +1,1 @@
+BLAKE3 C reference implementation, version 1.8.5 (from the blake3 crate's c/ directory). Licence: CC0-1.0 OR Apache-2.0 (OR Apache-2.0 WITH LLVM-exception). Portable backend only.
