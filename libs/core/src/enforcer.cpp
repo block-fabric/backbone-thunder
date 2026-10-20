@@ -282,7 +282,7 @@ Result<Hash32> Client::create_bmm_critical_data_tx(uint64_t value_sats, uint32_t
     e.hex_msg(4, hex_encode(critical_hash)); // ConsensusHex of [u8; 32] = raw order
     e.hex_msg(5, rev_hex(prev_bytes));
     Bytes resp;
-    auto s = ch_->call(W + "CreateBmmCriticalDataTransaction", e.buf, resp);
+    auto s = ch_->call(W + "CreateBmmCriticalDataTransaction", e.buf, resp, 120000, false);
     if (!s.ok()) return E(s);
     auto m = Message::parse(resp);
     auto t = m ? parse_rev(*m, 1) : std::nullopt;
@@ -298,7 +298,7 @@ Result<Hash32> Client::create_deposit_tx(const std::string& address, uint64_t va
     e.u64_value(3, value_sats);
     e.u64_value(4, fee_sats);
     Bytes resp;
-    auto s = ch_->call(W + "CreateDepositTransaction", e.buf, resp);
+    auto s = ch_->call(W + "CreateDepositTransaction", e.buf, resp, 120000, false);
     if (!s.ok()) return E(s);
     auto m = Message::parse(resp);
     auto t = m ? parse_rev(*m, 1) : std::nullopt;
@@ -309,7 +309,7 @@ Result<Hash32> Client::create_deposit_tx(const std::string& address, uint64_t va
 Result<std::string> Client::create_new_address()
 {
     Bytes resp;
-    auto s = ch_->call(W + "CreateNewAddress", {}, resp);
+    auto s = ch_->call(W + "CreateNewAddress", {}, resp, 120000, false);
     if (!s.ok()) return E(s);
     auto m = Message::parse(resp);
     if (!m) return E({-1, "bad CreateNewAddressResponse"});
@@ -322,7 +322,7 @@ Result<std::vector<Hash32>> Client::generate_to_address(uint32_t blocks, const s
     e.u32_value(1, blocks);
     e.str(2, address);
     Bytes resp;
-    auto s = ch_->call(M + "GenerateToAddress", e.buf, resp, 600000);
+    auto s = ch_->call(M + "GenerateToAddress", e.buf, resp, 600000, false);
     if (!s.ok()) return E(s);
     auto m = Message::parse(resp);
     if (!m) return E({-1, "bad GenerateToAddressResponse"});
@@ -341,7 +341,7 @@ Result<bool> Client::propose_withdrawal_bundle(const Bytes& tx)
     e.u32_value(1, slot_);
     e.bytes_value(2, tx);
     Bytes resp;
-    auto s = ch_->call(BP + "ProposeWithdrawalBundle", e.buf, resp);
+    auto s = ch_->call(BP + "ProposeWithdrawalBundle", e.buf, resp, 120000, false);
     if (!s.ok()) return E(s);
     return true;
 }

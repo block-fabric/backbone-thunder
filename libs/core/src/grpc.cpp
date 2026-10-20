@@ -279,7 +279,7 @@ static std::unique_ptr<Channel::Conn> open_conn(const Url& u, const std::string&
 }
 
 Status Channel::run(const std::string& method, const Bytes& request, const std::function<bool(const Bytes&)>& on_message, int timeout_ms,
-                    const std::atomic<bool>* cancel)
+                    const std::atomic<bool>* cancel, bool idempotent)
 {
     auto u = Url::parse(url_);
     if (!u) return {-1, "bad URL " + url_};
@@ -310,10 +310,18 @@ Status Channel::run(const std::string& method, const Bytes& request, const std::
         prd.read_callback = read_body_cb;
         c.cur = &st;
         int32_t sid = nghttp2_submit_request(c.sess, nullptr, hdrs, sizeof(hdrs) / sizeof(hdrs[0]), &prd, nullptr);
-        if (sid < 0 || !c.flush()) {
+        if (sid < 0) {
             c.cur = nullptr;
             c.broken = true;
-            continue; // reconnect once
+            return {-1, "cannot submit request"}; // nothing was sent
+        }
+        requests_sent_++;
+        if (!c.flush()) {
+            c.cur = nullptr;
+            c.broken = true;
+            // Bytes of the request may have reached the server: only idempotent calls retry.
+            if (idempotent && attempt == 0) continue;
+            return {-1, "connection lost while sending request"};
         }
         auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
         uint8_t buf[65536];
@@ -355,7 +363,8 @@ Status Channel::run(const std::string& method, const Bytes& request, const std::
         }
         c.cur = nullptr;
         if (!st.closed) {
-            if (attempt == 0 && st.rx.empty() && st.status < 0) continue; // stale connection: retry once
+            // The request was sent; the server may have executed it. Only idempotent calls retry.
+            if (idempotent && attempt == 0 && st.rx.empty() && st.status < 0) continue;
             return {-1, "connection lost"};
         }
         if (!st.transport_error.empty() && st.status < 0) return {-1, st.transport_error};
@@ -366,7 +375,7 @@ Status Channel::run(const std::string& method, const Bytes& request, const std::
     return {-1, "connection failed"};
 }
 
-Status Channel::call(const std::string& method, const Bytes& request, Bytes& response, int timeout_ms)
+Status Channel::call(const std::string& method, const Bytes& request, Bytes& response, int timeout_ms, bool idempotent)
 {
     std::lock_guard<std::mutex> l(mu_);
     bool got = false;
@@ -375,7 +384,7 @@ Status Channel::call(const std::string& method, const Bytes& request, Bytes& res
         got = true;
         return true;
     };
-    Status s = run(method, request, f, timeout_ms, nullptr);
+    Status s = run(method, request, f, timeout_ms, nullptr, idempotent);
     if (s.ok() && !got) return {-1, "empty unary response"};
     return s;
 }
@@ -384,7 +393,7 @@ Status Channel::stream(const std::string& method, const Bytes& request, const st
                        const std::atomic<bool>* cancel)
 {
     std::lock_guard<std::mutex> l(mu_);
-    return run(method, request, on_message, 0, cancel);
+    return run(method, request, on_message, 0, cancel, false);
 }
 
 } // namespace bt::grpc

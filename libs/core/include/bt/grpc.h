@@ -42,8 +42,13 @@ public:
     Channel(const Channel&) = delete;
     Channel& operator=(const Channel&) = delete;
 
-    /** method: "/package.Service/Method" */
-    Status call(const std::string& method, const Bytes& request, Bytes& response, int timeout_ms = 120000);
+    /** method: "/package.Service/Method". A call is retried (once, on a fresh connection)
+     *  only if it is idempotent; non-idempotent calls (wallet, mining, block producer:
+     *  anything that can move funds or mine) are never re-sent, the error is surfaced.
+     *  thunder-rust does not retry individual calls either. */
+    Status call(const std::string& method, const Bytes& request, Bytes& response, int timeout_ms = 120000, bool idempotent = true);
+    /** Number of HTTP/2 requests submitted on the wire (for tests). */
+    uint64_t requests_sent() const { return requests_sent_; }
     /** Server-streaming call; on_message returning false cancels. Returns when the stream ends. */
     Status stream(const std::string& method, const Bytes& request, const std::function<bool(const Bytes&)>& on_message,
                   const std::atomic<bool>* cancel = nullptr);
@@ -55,8 +60,9 @@ private:
     std::string url_, ca_;
     std::mutex mu_;
     std::unique_ptr<Conn> conn_;
+    std::atomic<uint64_t> requests_sent_{0};
     Status run(const std::string& method, const Bytes& request, const std::function<bool(const Bytes&)>& on_message, int timeout_ms,
-               const std::atomic<bool>* cancel);
+               const std::atomic<bool>* cancel, bool idempotent);
 };
 
 } // namespace bt::grpc
