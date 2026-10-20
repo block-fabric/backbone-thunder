@@ -82,3 +82,46 @@ TEST(betanet_replay_full_blocks)
                      to_string(info.second.latest().value), info.second.latest().height);
     if (auto p = st.pending_bundle_m6id(t)) std::fprintf(stderr, "  pending m6id %s\n", bt::hex_encode(*p).c_str());
 }
+
+TEST(betanet_full_rollback_to_genesis)
+{
+    // Disconnect the whole betanet history (block + its 2WPD window, newest first, as
+    // net_task.rs disconnect_tip_ does) and check that every table returns to empty;
+    // then reconnect and check the tip and state again.
+    auto blocks = fixture::load_blocks_bin(bttest::data_dir() + "/betanet/blocks.bin");
+    bt::kv::MemStore store;
+    State st;
+    std::vector<fixture::ReplayStep> steps;
+    auto r = fixture::replay_full(data(), blocks, st, store, &steps);
+    REQUIRE(r.error.empty());
+    uint64_t wealth;
+    size_t nutxo;
+    {
+        bt::kv::Txn t(store);
+        wealth = st.sidechain_wealth(t);
+        nutxo = st.utxos(t).size();
+    }
+    for (size_t i = steps.size(); i-- > 0;) {
+        bt::kv::Txn t(store);
+        st.disconnect_2wpd(t, steps[i].window);
+        st.disconnect_tip(t, steps[i].block.header, steps[i].block.body);
+        if (i > 0) st.put_accumulator(t, *bt::utreexo::MemForest::deserialize(steps[i - 1].accumulator));
+        else t.del(State::T_ACCUMULATOR, bt::Bytes{});
+        t.commit();
+    }
+    bt::kv::Txn t(store);
+    CHECK(!st.tip(t).has_value());
+    CHECK(st.utxos(t).empty());
+    CHECK(st.stxos(t).empty());
+    CHECK(st.bundles(t).empty());
+    CHECK(!st.pending_bundle_m6id(t).has_value());
+    CHECK(st.deposit_blocks(t).empty());
+    CHECK(st.bundle_event_blocks(t).empty());
+    // reconnect everything
+    State st2;
+    auto r2 = fixture::replay_full(data(), blocks, st2, store);
+    CHECK(r2.error.empty());
+    bt::kv::Txn t2(store);
+    CHECK_EQ(st2.sidechain_wealth(t2), wealth);
+    CHECK_EQ(st2.utxos(t2).size(), nutxo);
+}

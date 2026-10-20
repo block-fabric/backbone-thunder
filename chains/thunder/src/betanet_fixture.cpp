@@ -259,7 +259,8 @@ std::vector<std::pair<uint32_t, Bytes>> load_blocks_bin(const std::string& path)
     return r;
 }
 
-FullReplayResult replay_full(const Data& d, const std::vector<std::pair<uint32_t, Bytes>>& blocks, State& st, bt::kv::Store& store)
+FullReplayResult replay_full(const Data& d, const std::vector<std::pair<uint32_t, Bytes>>& blocks, State& st, bt::kv::Store& store,
+                             std::vector<ReplayStep>* steps)
 {
     FullReplayResult res;
     std::optional<uint32_t> prev_main_height;
@@ -313,6 +314,7 @@ FullReplayResult replay_full(const Data& d, const std::vector<std::pair<uint32_t
                 win.block_info.emplace_back(mb.header.block_hash, mb.info);
             }
             st.connect_2wpd(txn, win);
+            if (steps) steps->push_back(ReplayStep{b, win, st.accumulator(txn).serialize()});
         } catch (const StateError& e) {
             res.error = "height " + std::to_string(height) + ": " + e.what();
             return res;

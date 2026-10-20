@@ -75,7 +75,13 @@ struct FullReplayResult {
     uint32_t deposits = 0;
     std::string error;
 };
+struct ReplayStep {
+    Block block;
+    bt::mainchain::TwoWayPegData window;
+    Bytes accumulator; // serialized forest after the block and its 2WPD
+};
 /** Replay real blocks with all checks (signatures, Utreexo proofs and roots, merkle, BMM). */
-FullReplayResult replay_full(const Data& d, const std::vector<std::pair<uint32_t, Bytes>>& blocks, State& st, bt::kv::Store& store);
+FullReplayResult replay_full(const Data& d, const std::vector<std::pair<uint32_t, Bytes>>& blocks, State& st, bt::kv::Store& store,
+                             std::vector<ReplayStep>* steps = nullptr);
 
 } // namespace thunder::fixture
