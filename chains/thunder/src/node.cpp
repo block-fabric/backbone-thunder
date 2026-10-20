@@ -2,6 +2,7 @@
 // Distributed under the MIT software license.
 #include <thunder/node.h>
 
+#include <bt/fsperm.h>
 #include <bt/log.h>
 #include <bt/parse.h>
 
@@ -28,8 +29,10 @@ Node::~Node() { stop(); }
 
 bool Node::start(std::string& err)
 {
-    std::error_code ec;
-    std::filesystem::create_directories(cfg_.datadir, ec);
+    if (!bt::fsperm::private_dir(cfg_.datadir)) {
+        err = "cannot create " + cfg_.datadir;
+        return false;
+    }
     try {
         store_ = bt::kv::open_sqlite(cfg_.datadir + "/backbone-thunder.sqlite");
     } catch (const std::exception& e) {

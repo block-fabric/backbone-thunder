@@ -10,6 +10,7 @@
 #include <thunder/app.h>
 
 #include <bt/frost.h>
+#include <bt/fsperm.h>
 #include <bt/hd.h>
 #include <bt/jsonrpc.h>
 #include <bt/log.h>
@@ -238,7 +239,10 @@ int main(int argc, char** argv)
         return 1;
     }
     std::string wdir = wallet_dir ? *wallet_dir : cfg.datadir;
-    std::filesystem::create_directories(wdir);
+    if (!bt::fsperm::private_dir(wdir)) { // the wallet holds the seed
+        LOG_ERROR("cannot create %s", wdir.c_str());
+        return 1;
+    }
     Wallet wallet(wdir + "/backbone-wallet.sqlite", node, variant);
     if (mnemonic_path) {
         std::ifstream f(*mnemonic_path);
