@@ -4,6 +4,7 @@
 // `thunder-cli`: same subcommands and output as thunder-rust's thunder_app_cli
 // (cli/lib.rs), over the node's JSON-RPC.
 #include <bt/jsonrpc.h>
+#include <bt/parse.h>
 
 #include <algorithm>
 #include <cstdio>
@@ -89,9 +90,13 @@ int main(int argc, char** argv)
         if (r.rfind("http://", 0) == 0) r = r.substr(7);
         auto slash = r.find('/');
         if (slash != std::string::npos) r = r.substr(0, slash);
-        auto c = r.rfind(':');
-        host = r.substr(0, c);
-        if (c != std::string::npos) port = uint16_t(std::stoi(r.substr(c + 1)));
+        auto hp = bt::split_hostport(r, uint16_t(80));
+        if (!hp) {
+            std::fprintf(stderr, "error: invalid --rpc-url\n");
+            return 2;
+        }
+        host = hp->first;
+        port = hp->second;
     }
     UniValue params(UniValue::VOBJ);
     Spec spec;

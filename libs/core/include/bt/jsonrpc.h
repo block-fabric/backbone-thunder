@@ -4,7 +4,18 @@
 // JSON-RPC 2.0 over HTTP/1.1, shaped like jsonrpsee's server (what the LayerTwo nodes
 // use): POST with a single or batch request, positional or named params, -32601 for
 // unknown methods, -32602 for bad params, -32700 for parse errors, application errors
-// with code -1. CORS is permissive as in theirs (tower_http CorsLayer::permissive).
+// with code -1.
+//
+// Hardening (policy; their node uses tower_http CorsLayer::permissive and no auth):
+//  * no CORS headers unless an origin is explicitly allowed (Options::allowed_origins);
+//    a request carrying any other Origin is refused (403), so web pages cannot drive the
+//    unauthenticated wallet methods (CSRF);
+//  * the Host header must name loopback, the bind address or an allowed host (403
+//    otherwise), against DNS rebinding;
+//  * POST bodies must be application/json (415 otherwise, as jsonrpsee does);
+//  * binding a non-loopback address needs Options::allow_external.
+// Their own clients (BitWindow/orchestrator, thunder-cli, dc-hub) talk to 127.0.0.1 with
+// JSON bodies and no Origin, so they are unaffected.
 #pragma once
 
 #include <univalue.h>
@@ -37,8 +48,16 @@ struct Params {
 
 using Handler = std::function<UniValue(const Params&)>;
 
+struct Options {
+    std::vector<std::string> allowed_origins; // exact Origin values, or "*"
+    std::vector<std::string> allowed_hosts;   // extra Host header names
+    bool allow_external = false;              // permit a non-loopback bind
+    size_t max_body = 64 * 1024 * 1024;
+};
+
 class Server {
 public:
+    Options options;
     /** names: parameter names in order (for named-param calls); required: how many must be present. */
     void add(const std::string& method, std::vector<std::string> names, size_t required, Handler h);
     bool has(const std::string& method) const { return methods_.count(method) > 0; }
@@ -62,6 +81,11 @@ private:
     intptr_t fd_ = -1;
     std::thread thr_;
     void serve(intptr_t c);
+    std::string bind_ip_;
+
+public:
+    /** HTTP request handling, exposed for tests: returns the full HTTP response. */
+    std::string http(const std::string& method, const std::map<std::string, std::string>& headers, const std::string& body);
 };
 
 /** Minimal blocking JSON-RPC client (for <chain>-cli and tests). */

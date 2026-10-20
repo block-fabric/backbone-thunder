@@ -2,6 +2,8 @@
 // Distributed under the MIT software license.
 #include <bt/mainchain.h>
 
+#include <bt/parse.h>
+
 #include <univalue.h>
 
 namespace bt::mainchain {
@@ -30,7 +32,11 @@ static uint64_t u64field(const UniValue& v, const char* name, bool& ok)
     const UniValue& f = v.find_value(name);
     if (f.isNull()) return 0; // proto3 default
     try {
-        if (f.isStr()) return std::stoull(f.get_str());
+        if (f.isStr()) {
+            if (auto v = parse_u64(f.get_str())) return *v;
+            ok = false;
+            return 0;
+        }
         if (f.isNum()) return f.getInt<uint64_t>();
     } catch (...) {
     }

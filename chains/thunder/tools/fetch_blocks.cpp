@@ -10,10 +10,12 @@
 // blocks.bin records: u32 height, u32 length, bincode(Block) as received (without magic).
 #include <thunder/net.h>
 
+#include <bt/parse.h>
 #include <bt/quic.h>
 
 #include <univalue.h>
 
+#include <algorithm>
 #include <atomic>
 #include <condition_variable>
 #include <deque>
@@ -36,9 +38,9 @@ int main(int argc, char** argv)
         if (a == "--peer") peer = v;
         else if (a == "--index") index = v;
         else if (a == "--out") out = v;
-        else if (a == "--from") from = uint32_t(std::stoul(v));
-        else if (a == "--to") to = uint32_t(std::stoul(v));
-        else if (a == "--parallel") parallel = std::stoi(v);
+        else if (a == "--from") from = uint32_t(bt::parse_u64(v).value_or(0));
+        else if (a == "--to") to = uint32_t(std::min<uint64_t>(bt::parse_u64(v).value_or(UINT32_MAX), UINT32_MAX));
+        else if (a == "--parallel") parallel = int(std::clamp<uint64_t>(bt::parse_u64(v).value_or(8), 1, 100));
     }
     if (index.empty() || out.empty()) {
         std::fprintf(stderr, "usage: thunder-fetch-blocks --index blocks.jsonl --out blocks.bin [--peer host:port] [--from N] [--to N]\n");
@@ -59,9 +61,13 @@ int main(int argc, char** argv)
         }
         if (prevs.count(1)) ids[0] = prevs[1];
     }
-    auto colon = peer.rfind(':');
-    std::string host = peer.substr(0, colon);
-    uint16_t port = uint16_t(std::stoi(peer.substr(colon + 1)));
+    auto hp = bt::split_hostport(peer, uint16_t(4009));
+    if (!hp) {
+        std::fprintf(stderr, "invalid --peer\n");
+        return 2;
+    }
+    std::string host = hp->first;
+    uint16_t port = hp->second;
     auto addrs = bt::quic::resolve(host, port);
     if (addrs.empty()) {
         std::fprintf(stderr, "cannot resolve %s\n", host.c_str());

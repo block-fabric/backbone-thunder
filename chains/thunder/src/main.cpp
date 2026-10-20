@@ -13,6 +13,7 @@
 #include <bt/hd.h>
 #include <bt/jsonrpc.h>
 #include <bt/log.h>
+#include <bt/parse.h>
 
 #include <atomic>
 #include <csignal>
@@ -47,26 +48,9 @@ static std::string default_datadir()
 
 static bool parse_sockaddr(const std::string& s, bt::quic::SockAddr& out)
 {
-    std::string host;
-    std::string port;
-    if (!s.empty() && s[0] == '[') {
-        auto e = s.find(']');
-        if (e == std::string::npos || e + 1 >= s.size() || s[e + 1] != ':') return false;
-        host = s.substr(1, e - 1);
-        port = s.substr(e + 2);
-    } else {
-        auto c = s.rfind(':');
-        if (c == std::string::npos) return false;
-        host = s.substr(0, c);
-        port = s.substr(c + 1);
-    }
-    try {
-        int p = std::stoi(port);
-        if (p < 0 || p > 65535) return false;
-        out = {host, uint16_t(p)};
-    } catch (...) {
-        return false;
-    }
+    auto hp = bt::split_hostport(s, std::nullopt, true);
+    if (!hp) return false;
+    out = {hp->first, hp->second};
     return true;
 }
 
@@ -93,6 +77,10 @@ static void usage()
         "      --wallet-dir <DIR>                     [default: <DATADIR>]\n"
         "  -h, --help / -V, --version\n\n"
         "Backbone options:\n"
+        "      --bt-rpc-allowed-origin <ORIGIN>       Allow browser requests from this Origin (repeatable; \"*\" = any).\n"
+        "                                             Default: none (their node allows any origin)\n"
+        "      --bt-rpc-allowed-host <HOST>           Extra Host header name accepted by the RPC server\n"
+        "      --bt-rpc-allow-external                Allow binding the unauthenticated RPC to a non-loopback address\n"
         "      --bt-no-seeds                          Do not dial the built-in seed peers\n"
         "      --bt-no-p2p                            Disable P2P networking\n"
         "      --bt-wallet-derivation <v0.18.1|v0.18.0>  Key derivation of an imported mnemonic [default: v0.18.1]\n",
@@ -109,6 +97,7 @@ int main(int argc, char** argv)
     bool headless = false;
     bt::hd::Variant variant = bt::hd::Variant::V0_18_1;
     std::vector<std::string> unknown;
+    bt::jsonrpc::Options rpc_opts;
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i], val;
         bool has_eq = false;
@@ -145,7 +134,11 @@ int main(int argc, char** argv)
             return 0;
         } else if (a == "--add-peer") {
             if (!next(v)) return 2;
-            cfg.add_peers.push_back(v.rfind(':') == std::string::npos ? v + ":" + std::to_string(net::DEFAULT_PORT) : v);
+            if (!bt::split_hostport(v, net::DEFAULT_PORT)) {
+                std::fprintf(stderr, "error: invalid value '%s' for '--add-peer'\n", v.c_str());
+                return 2;
+            }
+            cfg.add_peers.push_back(v);
         } else if (a == "-d" || a == "--datadir") {
             if (!next(v)) return 2;
             cfg.datadir = v;
@@ -204,6 +197,14 @@ int main(int argc, char** argv)
         } else if (a == "--wallet-dir") {
             if (!next(v)) return 2;
             wallet_dir = v;
+        } else if (a == "--bt-rpc-allowed-origin") {
+            if (!next(v)) return 2;
+            rpc_opts.allowed_origins.push_back(v);
+        } else if (a == "--bt-rpc-allowed-host") {
+            if (!next(v)) return 2;
+            rpc_opts.allowed_hosts.push_back(v);
+        } else if (a == "--bt-rpc-allow-external") {
+            rpc_opts.allow_external = true;
         } else if (a == "--bt-no-seeds") {
             cfg.use_seeds = false;
         } else if (a == "--bt-no-p2p") {
@@ -252,6 +253,7 @@ int main(int argc, char** argv)
     App app(node, wallet);
     app.on_stop = [] { g_stop = true; };
     bt::jsonrpc::Server pub, priv;
+    pub.options = priv.options = rpc_opts;
     if (private_rpc_addr == rpc_addr) {
         register_rpc(pub, app, true, true);
         if (!pub.listen(rpc_addr.ip, rpc_addr.port, err)) {

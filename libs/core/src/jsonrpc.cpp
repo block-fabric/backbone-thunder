@@ -1,6 +1,9 @@
 // Copyright (c) 2026 The Backbone developers
 // Distributed under the MIT software license.
 #include <bt/jsonrpc.h>
+#include <bt/parse.h>
+
+#include <algorithm>
 
 #include <cstring>
 #include <sstream>
@@ -123,8 +126,15 @@ std::string Server::handle(const std::string& body)
     return notification ? "" : resp.write();
 }
 
+static bool is_loopback_ip(const std::string& ip) { return ip.rfind("127.", 0) == 0 || ip == "::1" || ip == "localhost"; }
+
 bool Server::listen(const std::string& ip, uint16_t port, std::string& err)
 {
+    if (!is_loopback_ip(ip) && !options.allow_external) {
+        err = "refusing to serve the unauthenticated RPC on non-loopback " + ip + " (pass --bt-rpc-allow-external to override)";
+        return false;
+    }
+    bind_ip_ = ip;
     sock_t fd = socket(AF_INET, SOCK_STREAM, 0);
     int one = 1;
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, (const char*)&one, sizeof(one));
@@ -168,7 +178,15 @@ void Server::stop()
     if (thr_.joinable()) thr_.join();
 }
 
-static bool read_request(sock_t c, std::string& method, std::string& body, bool& keep_alive)
+static std::string lower(std::string v)
+{
+    for (auto& ch : v) ch = char(std::tolower((unsigned char)ch));
+    return v;
+}
+
+// Reads one request; headers keys lower-cased. Returns false on malformed input.
+static bool read_request(sock_t c, std::string& method, std::map<std::string, std::string>& headers, std::string& body, bool& keep_alive,
+                         size_t max_body)
 {
     std::string buf;
     char tmp[8192];
@@ -184,22 +202,22 @@ static bool read_request(sock_t c, std::string& method, std::string& body, bool&
     std::string line;
     std::getline(hs, line);
     method = line.substr(0, line.find(' '));
-    size_t clen = 0;
     keep_alive = line.find("HTTP/1.1") != std::string::npos;
     while (std::getline(hs, line)) {
         if (!line.empty() && line.back() == '\r') line.pop_back();
         auto colon = line.find(':');
         if (colon == std::string::npos) continue;
-        std::string k = line.substr(0, colon), v = line.substr(colon + 1);
-        while (!v.empty() && v[0] == ' ') v.erase(0, 1);
-        for (auto& ch : k) ch = char(std::tolower((unsigned char)ch));
-        if (k == "content-length") clen = size_t(std::stoull(v));
-        if (k == "connection") {
-            for (auto& ch : v) ch = char(std::tolower((unsigned char)ch));
-            keep_alive = v != "close";
-        }
+        std::string k = lower(line.substr(0, colon)), v = line.substr(colon + 1);
+        while (!v.empty() && (v[0] == ' ' || v[0] == '\t')) v.erase(0, 1);
+        headers[k] = v;
     }
-    if (clen > 32 * 1024 * 1024) return false; // jsonrpsee default max request body 10 MB; blocks may be larger
+    if (auto it = headers.find("connection"); it != headers.end()) keep_alive = lower(it->second) != "close";
+    size_t clen = 0;
+    if (auto it = headers.find("content-length"); it != headers.end()) {
+        auto v = parse_u64(it->second);
+        if (!v || *v > max_body) return false;
+        clen = size_t(*v);
+    }
     body = buf.substr(hdr_end + 4);
     while (body.size() < clen) {
         auto n = recv(c, tmp, sizeof(tmp), 0);
@@ -220,24 +238,77 @@ static void send_all(sock_t c, const std::string& s)
     }
 }
 
+static std::string host_name(const std::string& host)
+{
+    if (!host.empty() && host[0] == '[') {
+        auto e = host.find(']');
+        return e == std::string::npos ? host : host.substr(1, e - 1);
+    }
+    auto c = host.rfind(':');
+    return lower(c == std::string::npos ? host : host.substr(0, c));
+}
+
+static std::string status_line(int code)
+{
+    switch (code) {
+    case 200: return "HTTP/1.1 200 OK\r\n";
+    case 403: return "HTTP/1.1 403 Forbidden\r\n";
+    case 405: return "HTTP/1.1 405 Method Not Allowed\r\n";
+    case 415: return "HTTP/1.1 415 Unsupported Media Type\r\n";
+    default: return "HTTP/1.1 400 Bad Request\r\n";
+    }
+}
+
+std::string Server::http(const std::string& method, const std::map<std::string, std::string>& headers, const std::string& body)
+{
+    auto reply = [](int code, const std::string& extra, const std::string& content, const std::string& ctype) {
+        std::string r = status_line(code) + extra;
+        if (!ctype.empty()) r += "Content-Type: " + ctype + "\r\n";
+        r += "Content-Length: " + std::to_string(content.size()) + "\r\n\r\n" + content;
+        return r;
+    };
+    // DNS rebinding: the Host must be ours
+    if (auto it = headers.find("host"); it != headers.end()) {
+        std::string h = host_name(it->second);
+        bool ok = h == "localhost" || h == "127.0.0.1" || h == "::1" || h == lower(bind_ip_) ||
+                  std::find(options.allowed_hosts.begin(), options.allowed_hosts.end(), h) != options.allowed_hosts.end();
+        if (!ok) return reply(403, "", "", "");
+    }
+    // CSRF: browsers send Origin; only explicitly allowed origins get through
+    std::string cors;
+    if (auto it = headers.find("origin"); it != headers.end()) {
+        const std::string& o = it->second;
+        bool any = std::find(options.allowed_origins.begin(), options.allowed_origins.end(), "*") != options.allowed_origins.end();
+        bool listed = std::find(options.allowed_origins.begin(), options.allowed_origins.end(), o) != options.allowed_origins.end();
+        if (!any && !listed) return reply(403, "", "", "");
+        cors = "Access-Control-Allow-Origin: " + (any ? std::string("*") : o) +
+               "\r\nAccess-Control-Allow-Methods: POST, OPTIONS\r\nAccess-Control-Allow-Headers: content-type\r\nVary: Origin\r\n";
+    }
+    if (method == "OPTIONS") return reply(cors.empty() ? 403 : 200, cors, "", "");
+    if (method != "POST") return reply(405, cors, "", "");
+    auto ct = headers.find("content-type");
+    if (ct == headers.end() || lower(ct->second).rfind("application/json", 0) != 0) return reply(415, cors, "", "");
+    std::string out = handle(body);
+    return reply(200, cors, out, "application/json; charset=utf-8");
+}
+
 void Server::serve(intptr_t ci)
 {
     sock_t c = sock_t(ci);
-    for (;;) {
-        std::string method, body;
-        bool keep;
-        if (!read_request(c, method, body, keep)) break;
-        std::string cors = "Access-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: *\r\nAccess-Control-Allow-Headers: *\r\n";
-        if (method == "OPTIONS") {
-            send_all(c, "HTTP/1.1 200 OK\r\n" + cors + "Content-Length: 0\r\n\r\n");
-        } else if (method != "POST") {
-            send_all(c, "HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\n\r\n");
-        } else {
-            std::string out = handle(body);
-            send_all(c, "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\n" + cors + "Content-Length: " + std::to_string(out.size()) +
-                            "\r\n\r\n" + out);
+    try {
+        for (;;) {
+            std::string method, body;
+            std::map<std::string, std::string> headers;
+            bool keep;
+            if (!read_request(c, method, headers, body, keep, options.max_body)) {
+                send_all(c, status_line(400) + "Content-Length: 0\r\nConnection: close\r\n\r\n");
+                break;
+            }
+            send_all(c, http(method, headers, body));
+            if (!keep) break;
         }
-        if (!keep) break;
+    } catch (...) {
+        // never let a malformed request take the process down
     }
     sclose(c);
 }

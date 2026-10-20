@@ -2,6 +2,8 @@
 // Distributed under the MIT software license.
 #include <thunder/json.h>
 
+#include <bt/parse.h>
+
 namespace thunder::json {
 
 static UniValue obj() { return UniValue(UniValue::VOBJ); }
@@ -251,14 +253,9 @@ uint64_t parse_u64(const UniValue& v)
     if (!v.isNum()) throw Error("expected an integer");
     const std::string& s = v.getValStr();
     if (s.empty() || s.find_first_not_of("0123456789") != std::string::npos) throw Error("expected an unsigned integer");
-    try {
-        size_t pos;
-        unsigned long long x = std::stoull(s, &pos);
-        if (pos != s.size()) throw Error("bad integer");
-        return x;
-    } catch (const std::out_of_range&) {
-        throw Error("integer out of range");
-    }
+    auto x = bt::parse_u64(s);
+    if (!x) throw Error("integer out of range");
+    return *x;
 }
 
 Hash32 parse_hash(const UniValue& v)
@@ -316,7 +313,9 @@ OutPoint parse_outpoint(const UniValue& v)
         if (c == std::string::npos) throw Error("invalid deposit outpoint");
         o.kind = OutPoint::Deposit;
         o.txid = parse_btc_hash(UniValue(s.substr(0, c)));
-        o.vout = uint32_t(std::stoul(s.substr(c + 1)));
+        auto vout = bt::parse_u64(s.substr(c + 1));
+        if (!vout || *vout > UINT32_MAX) throw Error("invalid deposit outpoint");
+        o.vout = uint32_t(*vout);
         return o;
     }
     if (k != "Regular" && k != "Coinbase") throw Error("invalid OutPoint variant");

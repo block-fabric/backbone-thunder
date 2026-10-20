@@ -2,6 +2,8 @@
 // Distributed under the MIT software license.
 #include <bt/grpc.h>
 
+#include <bt/parse.h>
+
 #include <nghttp2/nghttp2.h>
 
 #include <openssl/err.h>
@@ -54,16 +56,10 @@ std::optional<Url> Url::parse(const std::string& s)
         u.path_prefix = rest.substr(slash);
         while (!u.path_prefix.empty() && u.path_prefix.back() == '/') u.path_prefix.pop_back();
     }
-    if (!hostport.empty() && hostport[0] == '[') {
-        auto e = hostport.find(']');
-        if (e == std::string::npos) return std::nullopt;
-        u.host = hostport.substr(1, e - 1);
-        if (e + 1 < hostport.size() && hostport[e + 1] == ':') u.port = uint16_t(std::stoi(hostport.substr(e + 2)));
-    } else {
-        auto c = hostport.rfind(':');
-        u.host = hostport.substr(0, c);
-        if (c != std::string::npos) u.port = uint16_t(std::stoi(hostport.substr(c + 1)));
-    }
+    auto hp = split_hostport(hostport, uint16_t(u.tls ? 443 : 80));
+    if (!hp) return std::nullopt;
+    u.host = hp->first;
+    u.port = hp->second;
     if (!u.port) u.port = u.tls ? 443 : 80;
     if (u.host.empty()) return std::nullopt;
     return u;
@@ -154,8 +150,8 @@ static int on_header_cb(nghttp2_session*, const nghttp2_frame*, const uint8_t* n
     auto* c = (Channel::Conn*)ud;
     if (!c->cur) return 0;
     std::string n((const char*)name, nl), v((const char*)value, vl);
-    if (n == ":status") c->cur->http_status = std::atoi(v.c_str());
-    else if (n == "grpc-status") c->cur->status = std::atoi(v.c_str());
+    if (n == ":status") c->cur->http_status = int(parse_u64(v).value_or(0));
+    else if (n == "grpc-status") c->cur->status = int(std::min<uint64_t>(parse_u64(v).value_or(2), 1000)); // 2 = UNKNOWN
     else if (n == "grpc-message") c->cur->message = v;
     return 0;
 }

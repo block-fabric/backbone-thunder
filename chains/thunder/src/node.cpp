@@ -3,6 +3,7 @@
 #include <thunder/node.h>
 
 #include <bt/log.h>
+#include <bt/parse.h>
 
 #include <algorithm>
 #include <chrono>
@@ -70,11 +71,14 @@ bool Node::start(std::string& err)
         if (cfg_.use_seeds && cfg_.network == net::Network::Betanet)
             for (const char* s : {"seed.beta.ecash.drivecha.in", "seed.beta.ecash.eu.com", "seed.beta.ecash.ninja"})
                 dial_targets_[std::string(s) + ":" + std::to_string(net::DEFAULT_PORT)] = 0;
-        for (auto& p : cfg_.add_peers) dial_targets_[p] = 0;
+        for (auto& p : cfg_.add_peers)
+            if (bt::split_hostport(p, net::DEFAULT_PORT)) dial_targets_[p] = 0;
+            else LOG_WARN("ignoring invalid --add-peer '%s'", p.c_str());
         {
             Txn t(*store_);
             t.scan(T_PEERS, [&](bt::ByteSpan k, bt::ByteSpan) {
-                dial_targets_[std::string(k.begin(), k.end())] = 0;
+                std::string hp(k.begin(), k.end());
+                if (bt::split_hostport(hp)) dial_targets_[hp] = 0;
                 return true;
             });
         }
@@ -690,8 +694,14 @@ bool Node::submit_block(const Hash32& main_block_hash, const Header& h, const Bo
 }
 
 // ------------------------------------------------------------------ P2P
-bool Node::connect_peer(const std::string& hostport, std::string& err)
+bool Node::connect_peer(const std::string& hostport_in, std::string& err)
 {
+    auto hp = bt::split_hostport(hostport_in, net::DEFAULT_PORT);
+    if (!hp) {
+        err = "invalid peer address";
+        return false;
+    }
+    std::string hostport = hp->first.find(':') != std::string::npos ? "[" + hp->first + "]:" + std::to_string(hp->second) : hp->first + ":" + std::to_string(hp->second);
     if (!ep_) {
         err = "P2P disabled";
         return false;
@@ -1044,9 +1054,15 @@ void Node::net_loop()
             }
         }
         for (auto& hp : to_dial) {
-            auto colon = hp.rfind(':');
-            std::string host = hp.substr(0, colon);
-            uint16_t port = colon == std::string::npos ? net::DEFAULT_PORT : uint16_t(std::stoi(hp.substr(colon + 1)));
+            auto parsed = bt::split_hostport(hp, net::DEFAULT_PORT);
+            if (!parsed) {
+                std::lock_guard<std::mutex> l(peers_mu_);
+                LOG_WARN("dropping invalid peer address '%s'", hp.c_str());
+                dial_targets_.erase(hp);
+                continue;
+            }
+            std::string host = parsed->first;
+            uint16_t port = parsed->second;
             auto addrs = bt::quic::resolve(host, port);
             std::optional<bt::quic::SockAddr> a;
             for (auto& x : addrs)

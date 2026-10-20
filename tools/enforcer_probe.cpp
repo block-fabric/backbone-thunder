@@ -2,6 +2,7 @@
 // the calls a Thunder node makes, and print what it answers.
 //   bt-enforcer-probe https://enforcer.beta.ecash.ninja [slot]
 #include <bt/enforcer.h>
+#include <bt/parse.h>
 
 #include <cstdio>
 
@@ -10,7 +11,7 @@ using namespace bt;
 int main(int argc, char** argv)
 {
     std::string url = argc > 1 ? argv[1] : "http://localhost:50051";
-    uint8_t slot = argc > 2 ? uint8_t(std::stoi(argv[2])) : 9;
+    uint8_t slot = argc > 2 ? uint8_t(std::min<uint64_t>(bt::parse_u64(argv[2]).value_or(9), 255)) : 9;
     enforcer::Client c(url, slot);
     auto h = c.health("cusf.mainchain.v1.ValidatorService");
     std::printf("health: %s\n", h ? (*h ? "SERVING" : "NOT_SERVING") : "unavailable");
