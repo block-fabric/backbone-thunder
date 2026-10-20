@@ -7,6 +7,7 @@
 #include <bt/utreexo.h>
 
 #include <univalue.h>
+#include <unistd.h>
 
 using namespace bt;
 
@@ -190,4 +191,39 @@ TEST(utreexo_prove_verify_roundtrip)
     CHECK(bad.has_value() && !*bad);
     // a deleted leaf cannot be proven
     CHECK(!f.prove({leaves[3]}).has_value());
+}
+
+#include <bt/kv.h>
+#include <filesystem>
+
+TEST(kv_sqlite_empty_keys_and_values)
+{
+    std::string path = std::filesystem::temp_directory_path().string() + "/bt_kv_test_" + std::to_string(::getpid()) + ".sqlite";
+    {
+        auto st = kv::open_sqlite(path);
+        kv::Txn t(*st);
+        t.put(1, Bytes{}, Bytes{});
+        t.put(1, Bytes{1}, Bytes{2, 3});
+        t.put(2, Bytes{9}, Bytes{});
+        t.commit();
+        kv::Txn r(*st);
+        CHECK(r.get(1, Bytes{}).has_value());
+        CHECK(r.get(1, Bytes{})->empty());
+        CHECK(*r.get(1, Bytes{1}) == (Bytes{2, 3}));
+        CHECK(r.get(2, Bytes{9}).has_value());
+        CHECK(r.del(1, Bytes{}));
+        r.commit();
+        kv::Txn r2(*st);
+        CHECK(!r2.get(1, Bytes{}).has_value());
+        // LMDB-like memcmp order of little-endian u32 keys: 255 sorts after 256
+        r2.put(3, Bytes{0xff, 0, 0, 0}, Bytes{1});
+        r2.put(3, Bytes{0x00, 1, 0, 0}, Bytes{2});
+        r2.commit();
+        kv::Txn r3(*st);
+        auto last = r3.last(3);
+        CHECK(last && last->second == Bytes{1});
+    }
+    std::filesystem::remove(path);
+    std::filesystem::remove(path + "-wal");
+    std::filesystem::remove(path + "-shm");
 }

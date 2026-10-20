@@ -8,7 +8,10 @@ add_library(bt_core STATIC
   src/utreexo.cpp
   src/kv.cpp
   src/mainchain.cpp
-  src/protobuf.cpp)
+  src/protobuf.cpp
+  src/hd.cpp
+  src/log.cpp
+  src/jsonrpc.cpp)
 target_include_directories(bt_core PUBLIC include)
 target_link_libraries(bt_core PUBLIC bt_blake3 bt_univalue PkgConfig::SODIUM PkgConfig::SQLITE)
 

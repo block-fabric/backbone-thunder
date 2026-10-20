@@ -22,6 +22,7 @@
 namespace thunder {
 
 using bt::Bytes;
+using bt::append;
 using bt::ByteSpan;
 using bt::Hash32;
 using bt::Reader;

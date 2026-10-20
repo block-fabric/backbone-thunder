@@ -2,6 +2,7 @@
 // Distributed under the MIT software license.
 #include <bt/kv.h>
 
+#include <mutex>
 #include <sqlite3.h>
 #include <stdexcept>
 #include <vector>
@@ -109,6 +110,9 @@ void Txn::commit()
 
 // ---------------------------------------------------------------- SQLite
 namespace {
+// sqlite3_bind_blob binds NULL for a null pointer; empty keys/values must stay blobs.
+static const uint8_t EMPTY_BLOB[1] = {0};
+static const void* blob_ptr(const uint8_t* p) { return p ? (const void*)p : (const void*)EMPTY_BLOB; }
 class SqliteStore : public Store {
 public:
     explicit SqliteStore(const std::string& path)
@@ -130,9 +134,10 @@ public:
     }
     std::optional<Bytes> get(uint8_t table, ByteSpan key) const override
     {
+        std::lock_guard<std::recursive_mutex> l(mu);
         sqlite3_reset(q_get);
         sqlite3_bind_int(q_get, 1, table);
-        sqlite3_bind_blob(q_get, 2, key.data(), int(key.size()), SQLITE_STATIC);
+        sqlite3_bind_blob(q_get, 2, blob_ptr(key.data()), int(key.size()), SQLITE_STATIC);
         std::optional<Bytes> r;
         if (sqlite3_step(q_get) == SQLITE_ROW) {
             auto p = (const uint8_t*)sqlite3_column_blob(q_get, 0);
@@ -146,6 +151,7 @@ public:
     {
         // Materialise first so that callbacks may re-enter the store.
         std::vector<std::pair<Bytes, Bytes>> rows;
+        std::unique_lock<std::recursive_mutex> l(mu);
         sqlite3_reset(q);
         sqlite3_bind_int(q, 1, table);
         while (sqlite3_step(q) == SQLITE_ROW) {
@@ -156,6 +162,7 @@ public:
             rows.emplace_back(Bytes(kp, kp + kn), Bytes(vp, vp + vn));
         }
         sqlite3_reset(q);
+        l.unlock();
         for (auto& [k, v] : rows)
             if (!fn(k, v)) return;
     }
@@ -163,13 +170,14 @@ public:
     void rscan(uint8_t table, const std::function<bool(ByteSpan, ByteSpan)>& fn) const override { scan_impl(q_rscan, table, fn); }
     void apply(const Batch& b) override
     {
+        std::lock_guard<std::recursive_mutex> l(mu);
         exec("BEGIN IMMEDIATE");
         for (auto& [k, v] : b.ops) {
             sqlite3_stmt* q = v ? q_put : q_del;
             sqlite3_reset(q);
             sqlite3_bind_int(q, 1, k.first);
-            sqlite3_bind_blob(q, 2, k.second.data(), int(k.second.size()), SQLITE_STATIC);
-            if (v) sqlite3_bind_blob(q, 3, v->data(), int(v->size()), SQLITE_STATIC);
+            sqlite3_bind_blob(q, 2, blob_ptr(k.second.data()), int(k.second.size()), SQLITE_STATIC);
+            if (v) sqlite3_bind_blob(q, 3, blob_ptr(v->data()), int(v->size()), SQLITE_STATIC);
             if (sqlite3_step(q) != SQLITE_DONE) {
                 exec("ROLLBACK");
                 throw std::runtime_error(std::string("sqlite write: ") + sqlite3_errmsg(db));
@@ -188,6 +196,7 @@ private:
             throw std::runtime_error("sqlite: " + e);
         }
     }
+    mutable std::recursive_mutex mu; // one connection shared by all threads
     sqlite3* db = nullptr;
     sqlite3_stmt *q_get = nullptr, *q_scan = nullptr, *q_rscan = nullptr, *q_put = nullptr, *q_del = nullptr;
 };
