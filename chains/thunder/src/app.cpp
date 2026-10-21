@@ -162,12 +162,13 @@ void register_rpc(bt::jsonrpc::Server& s, App& app, bool public_api, bool privat
     });
     if (public_api) {
         s.add("connect_block", {"block", "main_block_hash"}, 2, [&app](const Params& p) {
+            json::require_struct(p[0], "Block", {"header", "body"});
             Header h = json::parse_header(p[0]["header"]);
             Body b = json::parse_body(p[0]["body"]);
             return UniValue(app.connect_block(h, b, json::parse_btc_hash(p[1])));
         });
         s.add("get_block_hash", {"height"}, 1, [&n](const Params& p) {
-            uint64_t h = json::parse_u64(p[0]);
+            uint64_t h = json::parse_u32(p[0]);
             auto r = h > UINT32_MAX ? std::nullopt : n.block_hash_at(uint32_t(h));
             return r ? json::hash(*r) : UniValue();
         });

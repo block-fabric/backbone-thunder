@@ -38,8 +38,14 @@ UniValue withdrawal_bundle_info(const WithdrawalBundleInfo& i);
 
 /** A request value that does not parse: jsonrpsee's -32602 "Invalid params", the cause (serde's) as data. */
 struct Error : bt::jsonrpc::RpcError {
-    explicit Error(const std::string& cause) : bt::jsonrpc::RpcError(-32602, "Invalid params", cause) {}
+    /** `at`: the request value it is about (the server adds serde_json's position of it). */
+    explicit Error(const std::string& cause, const UniValue* at = nullptr) : bt::jsonrpc::RpcError(-32602, "Invalid params", cause, at) {}
 };
+/** serde's Unexpected of a JSON value ("string \"x\"", "integer `5`", "sequence", ...). */
+std::string serde_unexpected(const UniValue& v);
+uint32_t parse_u32(const UniValue& v);
+/** serde's derived Deserialize of a struct: an object with the (non-Option) `fields`, else serde's error. */
+void require_struct(const UniValue& v, const char* name, std::initializer_list<const char*> fields);
 Hash32 parse_hash(const UniValue& v);
 Hash32 parse_btc_hash(const UniValue& v);
 Address parse_address(const UniValue& v);
