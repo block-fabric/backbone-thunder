@@ -131,26 +131,25 @@ static std::set<Address> parse_addresses(const UniValue& v)
     return s;
 }
 
-static UniValue openapi_schema(const bt::jsonrpc::Server& s)
+static UniValue openapi_schema()
 {
-    // utoipa's full schema is not reproduced; methods are listed so clients can introspect.
-    UniValue r(UniValue::VOBJ);
-    r.pushKV("openapi", "3.1.0");
-    UniValue info(UniValue::VOBJ);
-    info.pushKV("title", "thunder");
-    info.pushKV("version", "0.18.2");
-    r.pushKV("info", info);
-    UniValue paths(UniValue::VOBJ);
-    for (auto& m : s.methods()) paths.pushKV("/" + m, UniValue(UniValue::VOBJ));
-    r.pushKV("paths", paths);
-    return r;
+    // Their utoipa document, byte for byte (MIT, thunder-rust v0.18.2); parsed once.
+    static const UniValue doc = [] {
+        UniValue d;
+        if (!d.read(std::string_view{
+#include "openapi_schema.inc"
+            }))
+            throw std::runtime_error("openapi_schema.inc does not parse");
+        return d;
+    }();
+    return doc;
 }
 
 void register_rpc(bt::jsonrpc::Server& s, App& app, bool public_api, bool private_api)
 {
     Node& n = app.node;
     Wallet& w = app.wallet;
-    s.add("openapi_schema", {}, 0, [&s](const Params&) { return openapi_schema(s); });
+    s.add("openapi_schema", {}, 0, [](const Params&) { return openapi_schema(); });
     s.add("get_block", {"block_hash", "verbose"}, 1, [&n](const Params& p) -> UniValue {
         Hash32 h = json::parse_hash(p[0]);
         bool verbose = p[1].isBool() && p[1].get_bool();
