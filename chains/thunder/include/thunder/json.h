@@ -8,6 +8,7 @@
 
 #include <thunder/state.h>
 
+#include <bt/jsonrpc.h>
 #include <univalue.h>
 
 namespace thunder::json {
@@ -35,8 +36,9 @@ UniValue bitcoin_tx(const std::vector<bt::btc::TxOut>& outs);
 UniValue withdrawal_bundle(const WithdrawalBundle& w);
 UniValue withdrawal_bundle_info(const WithdrawalBundleInfo& i);
 
-struct Error : std::runtime_error {
-    using std::runtime_error::runtime_error;
+/** A request value that does not parse: jsonrpsee's -32602 "Invalid params", the cause (serde's) as data. */
+struct Error : bt::jsonrpc::RpcError {
+    explicit Error(const std::string& cause) : bt::jsonrpc::RpcError(-32602, "Invalid params", cause) {}
 };
 Hash32 parse_hash(const UniValue& v);
 Hash32 parse_btc_hash(const UniValue& v);

@@ -44,7 +44,8 @@ void Wallet::set_seed(const bt::ByteArray<64>& s)
 void Wallet::set_seed_from_mnemonic(const std::string& mnemonic)
 {
     auto p = bt::hd::parse_mnemonic(mnemonic);
-    if (!p) throw std::runtime_error("invalid mnemonic");
+    // tiny-bip39's words, as their set_seed_from_mnemonic answers (code -1).
+    if (!p) throw std::runtime_error(bt::hd::mnemonic_error(mnemonic));
     set_seed(bt::hd::mnemonic_to_seed(*p));
 }
 

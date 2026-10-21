@@ -4,6 +4,9 @@
 
 #include <bt/parse.h>
 
+#include <cctype>
+#include <cstdio>
+
 namespace thunder::json {
 
 static UniValue obj() { return UniValue(UniValue::VOBJ); }
@@ -40,8 +43,10 @@ UniValue content(const Content& c)
         r.pushKV("Value", UniValue(c.value));
     } else {
         UniValue w = obj();
-        w.pushKV("value_sats", UniValue(c.value));
-        w.pushKV("main_fee_sats", UniValue(c.main_fee));
+        // OutputContent's serde is IfIsHumanReadable<FromInto<DefaultRepr>, ...>: JSON (human readable)
+        // takes DefaultRepr, whose fields are "value" and "main_fee" (amounts in sats).
+        w.pushKV("value", UniValue(c.value));
+        w.pushKV("main_fee", UniValue(c.main_fee));
         w.pushKV("main_address", c.main_address.to_string());
         r.pushKV("Withdrawal", w);
     }
@@ -172,7 +177,7 @@ UniValue body(const Body& b, bool verbose)
     for (auto& t : b.transactions) {
         UniValue tv = obj();
         tx_fields(tv, t);
-        if (verbose) tv.pushKV("canonical_bytes", bt::hex_encode(t.canonical_bytes())); // #[serde(flatten)]
+        if (verbose) tv.pushKV("canonical_bytes", "0x" + bt::hex_encode(t.canonical_bytes())); // #[serde(with = "const_hex")]: 0x-prefixed
         txs.push_back(tv);
     }
     r.pushKV("transactions", txs);
@@ -242,7 +247,7 @@ UniValue withdrawal_bundle_info(const WithdrawalBundleInfo& i)
         r.pushKV("Known", withdrawal_bundle(i.bundle));
     } else {
         // serde_json cannot serialize a map with OutPoint keys; theirs fails here
-        throw Error("key must be a string");
+        throw std::runtime_error("key must be a string");
     }
     return r;
 }
@@ -258,10 +263,39 @@ uint64_t parse_u64(const UniValue& v)
     return *x;
 }
 
+// const-hex's decode_to_array, which the 32-byte hashes' serde uses: an optional 0x prefix, then an odd length,
+// the length, the first character that is not hex, in its words.
+static std::string rust_char_debug(unsigned char b)
+{
+    switch (b) {
+    case 0: return "'\\0'";
+    case '\t': return "'\\t'";
+    case '\n': return "'\\n'";
+    case '\r': return "'\\r'";
+    case '\'': return "'\\''";
+    case '\\': return "'\\\\'";
+    }
+    char buf[16];
+    if (b < 0x20 || b == 0x7f) {
+        std::snprintf(buf, sizeof(buf), "'\\u{%x}'", b);
+        return buf;
+    }
+    if (b < 0x80) return std::string("'") + char(b) + "'";
+    // const-hex reports the byte as a char (latin-1), whatever the UTF-8.
+    return std::string("'") + char(0xc0 | (b >> 6)) + char(0x80 | (b & 0x3f)) + "'";
+}
+
 Hash32 parse_hash(const UniValue& v)
 {
     if (!v.isStr()) throw Error("expected a hex string");
-    auto h = bt::hex_to_array<32>(v.get_str());
+    std::string s = v.get_str();
+    if (s.rfind("0x", 0) == 0) s = s.substr(2);
+    if (s.size() % 2) throw Error("odd number of digits");
+    if (s.size() != 64) throw Error("invalid string length");
+    for (size_t i = 0; i < s.size(); i++) {
+        if (!std::isxdigit((unsigned char)s[i])) throw Error("invalid character " + rust_char_debug((unsigned char)s[i]) + " at position " + std::to_string(i));
+    }
+    auto h = bt::hex_to_array<32>(s);
     if (!h) throw Error("invalid hash");
     return *h;
 }
@@ -275,6 +309,10 @@ Hash32 parse_btc_hash(const UniValue& v)
 Address parse_address(const UniValue& v)
 {
     if (!v.isStr()) throw Error("expected an address string");
+    // thunder_types::ParseAddress: "bs58 error", or "wrong address length {n} != 20".
+    auto d = bt::base58_decode(v.get_str());
+    if (!d) throw Error("bs58 error");
+    if (d->size() != 20) throw Error("wrong address length " + std::to_string(d->size()) + " != 20");
     auto a = Address::from_base58(v.get_str());
     if (!a) throw Error("invalid address");
     return *a;
@@ -283,7 +321,8 @@ bt::btc::Address parse_btc_address(const UniValue& v)
 {
     if (!v.isStr()) throw Error("expected a bitcoin address");
     auto a = bt::btc::Address::parse(v.get_str());
-    if (!a) throw Error("invalid bitcoin address");
+    // rust-bitcoin 0.32 falls back to base58 when bech32 does not decode: "base58 error".
+    if (!a) throw Error(bt::base58check_decode(v.get_str()) ? "invalid bitcoin address" : "base58 error");
     return *a;
 }
 
@@ -340,8 +379,8 @@ Output parse_output(const UniValue& v)
         o.content.value = parse_u64(x);
     } else if (k == "Withdrawal") {
         o.content.kind = Content::Withdrawal;
-        o.content.value = parse_u64(x["value_sats"]);
-        o.content.main_fee = parse_u64(x["main_fee_sats"]);
+        o.content.value = parse_u64(x["value"]);
+        o.content.main_fee = parse_u64(x["main_fee"]);
         o.content.main_address = parse_btc_address(x["main_address"]);
     } else {
         throw Error("invalid content variant");
