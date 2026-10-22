@@ -1,0 +1,38 @@
+{
+  "comment": "Thunder on eCash, our app of the LayerTwo-compatible drop-in node (doc/app.md): read by core/cmake/BtDesktopApp.cmake (the host's chainconfig.h) and by the interface (chain/config.ts). The networks are the node's: main = betanet (eCash's betanet), test = forknet; slot 9 as on eCash.",
+  "name": "Thunder",
+  "bin": "thunder",
+  "role": "sidechain",
+  "coin": { "ticker": "ECX", "name": "eCash" },
+  "uriScheme": "thunder",
+  "blockTarget": 600,
+  "brand": {
+    "color": "#a585ff",
+    "iconHue": 0,
+    "mark": ["M18.5 3.5L8 18h7.5l-2 10.5L24.5 14H17z", "M3.5 11.5h4", "M2.5 16.5h3", "M4.5 21.5h3"]
+  },
+  "networks": {
+    "main": { "p2p": 4009, "rpc": 6009, "hrp": "", "pubkey": 0, "script": 0 },
+    "test": { "p2p": 4009, "rpc": 6009, "hrp": "", "pubkey": 0, "script": 0 },
+    "signet": { "p2p": 4009, "rpc": 6009, "hrp": "", "pubkey": 0, "script": 0 },
+    "regtest": { "p2p": 4009, "rpc": 6009, "hrp": "", "pubkey": 0, "script": 0 }
+  },
+  "mainchain": {
+    "name": "eCash",
+    "ticker": "ECX",
+    "uriScheme": "ecash",
+    "networks": {
+      "main": { "rpc": 50051, "hrp": "bc", "pubkey": 0, "script": 5 },
+      "test": { "rpc": 50051, "hrp": "bc", "pubkey": 0, "script": 5 },
+      "signet": { "rpc": 50051, "hrp": "tb", "pubkey": 111, "script": 196 },
+      "regtest": { "rpc": 50051, "hrp": "bcrt", "pubkey": 111, "script": 196 }
+    }
+  },
+  "links": {
+    "website": "https://blockfab.org/drivechains/",
+    "source": "https://github.com/block-fabric/backbone-thunder",
+    "issues": "https://github.com/block-fabric/backbone-thunder/issues",
+    "guide": "https://github.com/block-fabric/backbone-thunder/blob/main/doc/app.md"
+  },
+  "drop": ["sidechains", "sidechain-nodes", "mine", "wallets", "advanced", "messages", "psbt", "multisig", "proof", "timestamp", "crypto", "tools", "addresses", "bmm", "kit"]
+}

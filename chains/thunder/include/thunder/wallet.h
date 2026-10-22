@@ -39,6 +39,8 @@ public:
     Transaction create_withdrawal(const bt::btc::Address& main_address, uint64_t value, uint64_t main_fee, uint64_t fee);
     AuthorizedTransaction authorize(const Transaction& tx);
     bt::hd::Variant variant() const { return variant_; }
+    /** SHA-256(label 0x00 seed), or nothing without a seed: a public fingerprint of the seed (the app layer's), never the seed. */
+    std::optional<Hash32> seed_digest(std::string_view label);
 
 private:
     std::unique_ptr<bt::kv::Store> store_;

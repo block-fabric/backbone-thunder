@@ -4,6 +4,9 @@
 
 #include <algorithm>
 
+#include <bt/crypto.h>
+#include <sodium.h>
+
 namespace thunder {
 
 using bt::kv::Txn;
@@ -39,6 +42,17 @@ void Wallet::set_seed(const bt::ByteArray<64>& s)
     t.clear(W_INDEX_TO_ADDR);
     t.clear(W_ADDR_TO_INDEX);
     t.commit();
+}
+
+std::optional<Hash32> Wallet::seed_digest(std::string_view label)
+{
+    std::lock_guard<std::mutex> l(mu_);
+    auto s = seed();
+    if (!s) return std::nullopt;
+    const uint8_t zero = 0;
+    Hash32 h = bt::sha256_parts({bt::ByteSpan(reinterpret_cast<const uint8_t*>(label.data()), label.size()), bt::ByteSpan(&zero, 1), s->span()});
+    sodium_memzero(s->data(), s->size());
+    return h;
 }
 
 void Wallet::set_seed_from_mnemonic(const std::string& mnemonic)

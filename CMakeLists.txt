@@ -20,6 +20,17 @@ add_subdirectory(core)
 
 add_subdirectory(chains/thunder)
 
+# Our app of Thunder (doc/app.md): thunder-app, the node with our interface; and its pages as a pack for the unified
+# wallet (target thunder-app-pack). Needs WebKitGTK (Linux) or WebView2 (Windows), npm, and the sidechain template's
+# repository (BT_KIT_DIR) at the commit of app/kit.commit.
+option(BT_BUILD_APP "Build thunder-app" OFF)
+if(BT_BUILD_APP)
+  include(core/cmake/BtDesktopApp.cmake)
+  bt_desktop_app(thunder-app STEM thunder NAME Thunder VERSION ${PROJECT_VERSION}
+                 CHAIN ${CMAKE_SOURCE_DIR}/app/chain MANIFEST ${CMAKE_SOURCE_DIR}/app/manifest.json
+                 KIT_COMMIT_FILE ${CMAKE_SOURCE_DIR}/app/kit.commit MAIN ${CMAKE_SOURCE_DIR}/chains/thunder/app/main.cpp NODE_TARGET thunder)
+endif()
+
 if(BT_BUILD_TESTS)
   enable_testing()
   add_subdirectory(tests)
