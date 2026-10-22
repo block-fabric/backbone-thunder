@@ -483,3 +483,55 @@ TEST(quirk_deposit_blocks_le_key_order)
     }
     CHECK(panicked);
 }
+
+TEST(duplicate_input_refused_by_block_and_mempool)
+{
+    // A transaction that spends one outpoint twice (here worth 1000, paying 1900: coins made from nothing if let in).
+    // lib/state/block.rs: a block with it is refused (the sorted input keys, UtxoDoubleSpent, after the proofs and
+    // the merkle root); lib/mempool.rs put: refused at the outpoint's second time (UtxoDoubleSpent).
+    Chain c;
+    auto k = key("dup");
+    c.connect({});
+    c.deposit(addr(k), 1000, 7);
+    auto dep = c.find_utxo(addr(k));
+    auto dup = spend({dep, dep}, {value_out(addr(k), 1900)}, {k, k});
+    std::string why;
+    try {
+        c.connect({dup});
+    } catch (const StateError& e) {
+        why = e.what();
+    }
+    CHECK(!why.empty());
+    CHECK(why.find("UtxoDoubleSpent") != std::string::npos || why.find("Utreexo") != std::string::npos);
+    // The same outpoint in two transactions of one block: UtxoDoubleSpent.
+    auto a = spend({dep}, {value_out(addr(k), 900)}, {k});
+    auto b = spend({dep}, {value_out(addr(k), 800)}, {k});
+    why.clear();
+    try {
+        c.connect({a, b});
+    } catch (const StateError& e) {
+        why = e.what();
+    }
+    CHECK(why.find("UtxoDoubleSpent") != std::string::npos);
+    // The chain is as before: the deposit is still there, unspent.
+    CHECK(c.find_utxo(addr(k)).first.key() == dep.first.key());
+
+    // The mempool: twice in one transaction, or already spent by one in it: refused; else let in.
+    std::map<std::array<uint8_t, 37>, Hash32> spent;
+    bool refused = false;
+    try {
+        mempool_check_inputs(spent, dup.transaction);
+    } catch (const StateError& e) {
+        refused = std::string(e.what()) == "UtxoDoubleSpent";
+    }
+    CHECK(refused);
+    mempool_check_inputs(spent, a.transaction);
+    spent[dep.first.key()] = a.transaction.txid();
+    refused = false;
+    try {
+        mempool_check_inputs(spent, b.transaction);
+    } catch (const StateError& e) {
+        refused = std::string(e.what()) == "UtxoDoubleSpent";
+    }
+    CHECK(refused);
+}

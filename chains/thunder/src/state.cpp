@@ -1057,4 +1057,13 @@ void State::disconnect_2wpd(Txn& t, const TwoWayPegData& d) const
     apply_diff(t, diff);
 }
 
+void mempool_check_inputs(const std::map<std::array<uint8_t, 37>, Hash32>& spent, const Transaction& tx)
+{
+    std::set<std::array<uint8_t, 37>> own;
+    for (auto& [op, _] : tx.inputs) {
+        auto k = op.key();
+        if (spent.count(k) || !own.insert(k).second) throw StateError("UtxoDoubleSpent");
+    }
+}
+
 } // namespace thunder

@@ -7,6 +7,8 @@
 // keyed by little-endian u32 under memcmp order, exactly like their SerdeBincode<u32> key).
 #pragma once
 
+#include <array>
+#include <map>
 #include <thunder/types.h>
 
 #include <bt/kv.h>
@@ -171,5 +173,12 @@ private:
 // value encodings (also used by the archive)
 void enc_bundle_info(Writer& w, const WithdrawalBundleInfo& i);
 WithdrawalBundleInfo dec_bundle_info(Reader& r);
+
+/**
+ * lib/mempool.rs MemPool::put: an input the mempool already spends is refused (UtxoDoubleSpent); theirs records each
+ * input as it checks it, so an outpoint a transaction spends twice is refused at its second time, as in a block
+ * (block.rs, the sorted input keys). Nothing is changed when refused.
+ */
+void mempool_check_inputs(const std::map<std::array<uint8_t, 37>, Hash32>& spent, const Transaction& tx);
 
 } // namespace thunder
