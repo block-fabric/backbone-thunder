@@ -10,6 +10,9 @@
 #include <thunder/net.h>
 #include <thunder/state.h>
 
+// The P2P hardening shared with the sidechain template (rate_key, ban_active, HeadersBudgets).
+#include <bt/sidechain/node.h>
+
 #include <bt/enforcer.h>
 #include <bt/kv.h>
 #include <bt/quic.h>
@@ -128,12 +131,15 @@ private:
         std::optional<net::PeerState> state;
         std::set<Hash32> requested_blocks;
         bool headers_pending = false;
+        bool bodies_chain = false; // a request_bodies chain is running for this peer
+        int64_t last_sync_try = 0; // when its tip was last looked at (handle_peer_state)
     };
     std::unique_ptr<bt::quic::Endpoint> ep_;
     std::mutex peers_mu_;
     std::map<bt::quic::ConnId, Peer> peers_;
     std::map<std::string, int64_t> dial_targets_; // host:port -> next dial time
-    std::map<std::string, int64_t> banned_;       // ip -> until
+    std::map<std::string, int64_t> banned_;       // bt::sidechain::rate_key(ip) -> until
+    bt::sidechain::HeadersBudgets headers_budgets_; // GetHeaders per remote IP, under peers_mu_
     std::array<uint8_t, 4> magic_{};
     std::optional<net::TipInfo> cached_tip_info_;
     std::mutex jobs_mu_;
@@ -152,6 +158,8 @@ private:
     void handle_peer_state(bt::quic::ConnId c, const net::PeerState& ps);
     void on_headers(bt::quic::ConnId c, const net::TipInfo& target, const std::vector<Header>& hs);
     void request_bodies(bt::quic::ConnId c, const net::TipInfo& target);
+    void start_body_chain(bt::quic::ConnId c, const net::TipInfo& target);
+    void end_body_chain(bt::quic::ConnId c);
     void ban(bt::quic::ConnId c, const std::string& why);
     std::optional<net::TipInfo> our_tip_info();
     void relay_tx(const AuthorizedTransaction& tx, std::optional<bt::quic::ConnId> except);
