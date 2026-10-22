@@ -89,17 +89,29 @@ genesis; `deposit_blocks` little-endian keys under memcmp order.
 * Peer sync is simpler than their `handle_peer_state` decision table: we fetch any
   advertised tip that is not ours (after the same total-work and BMM checks, which ban) and
   let `better_tip` decide in `reorg_to_tip`; outcomes are the same, traffic may differ.
-* Mainchain reorgs: a tip no longer BMM-verified on the active mainchain is disconnected
-  with its 2WPD (v0.18.2 `4df63d3`); their `side_tips` table is not ported, so we wait for
-  a peer to advertise the alternative tip instead of switching to it from the archive.
 * `openapi_schema` lists the methods instead of utoipa's full schema.
 * No GUI; `--headless` is implied.
+
+## Mainchain reorgs
+
+Their side-tips index is ported (`side_tips.{h,cpp}`, from backbone-bitnames/zside; their
+`lib/archive/side_tips/mod.rs` is byte-identical in thunder-rust 0.18.2, thunder-orchard and
+plain-bitnames): on each mainchain move the index follows the enforcer's tip
+(`sync_side_tips_to_tip`), then `handle_mainchain_block_event` disconnects (with the 2WPD and
+the mempool, 4df63d3) only a state tip outside the tip set and reorgs to the best ordered
+side tip when `better_tip` prefers it; NewTipReady and the peer-tip check gate on the index.
+A sidechain block whose BMM block is reorged away is removed from the ordered tips only,
+never from the tip set, so it **stays connected**, as on live Thunder (0.18.2); the old rule
+here (disconnect a tip no longer BMM-verified) split from their node on such a reorg. The
+halt on a missing commitment is not reproduced (`REPRODUCE_SIDE_TIPS_HALT = false`, user
+decision 2026-10-22, as BitNames, BitAssets and zSide). `--bt-rebuild-side-tips` rebuilds the
+index from the active mainchain. Tests: `tests/test_thunder_side_tips.cpp`.
 
 ## Remaining for Thunder
 
 1. Live differential runs on the test machine (doc/differential-tests.md), especially RPC
    JSON byte-diffs, mining/BMM, bundles Succeeded/Failed and reorgs on regtest.
-2. `side_tips` port and SubscribeEvents-driven mainchain task (reorg responsiveness).
+2. SubscribeEvents-driven mainchain task (reorg responsiveness; we poll GetChainTip).
 3. Windows: the mingw64 cross build works (fully static `thunder.exe`, system DLLs only)
    but has not been run on Windows yet (paths, sockets, shutdown).
 4. Performance work before chains grow: Txn scans copy tables; collect_withdrawal_bundle

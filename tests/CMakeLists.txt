@@ -7,5 +7,7 @@ target_link_libraries(bt_tests PRIVATE bt_test_harness bt_core_test_cases thunde
 target_compile_definitions(bt_tests PRIVATE BT_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data")
 add_test(NAME bt_tests COMMAND bt_tests)
 if(BT_WITH_NET)
-  target_link_libraries(bt_tests PRIVATE bt_net)
+  # Mainchain reorgs through the node's side-tips handling (needs the node library).
+  target_sources(bt_tests PRIVATE test_thunder_side_tips.cpp)
+  target_link_libraries(bt_tests PRIVATE thunder_node bt_net)
 endif()

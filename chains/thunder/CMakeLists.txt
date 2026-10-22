@@ -2,7 +2,8 @@
 add_library(thunder_core STATIC
   src/types.cpp
   src/state.cpp
-  src/betanet_fixture.cpp)
+  src/betanet_fixture.cpp
+  src/side_tips.cpp)
 target_include_directories(thunder_core PUBLIC include)
 target_link_libraries(thunder_core PUBLIC bt_core)
 target_sources(thunder_core PRIVATE src/net.cpp src/archive.cpp src/json.cpp)

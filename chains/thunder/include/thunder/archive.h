@@ -98,10 +98,12 @@ public:
     /** better_tip(tip0, tip1): which tip wins, or nullopt if neither. */
     std::optional<TipRef> better_tip(const bt::kv::Txn& t, const TipRef& tip0, const TipRef& tip1) const;
 
-private:
+    bool has_body(const bt::kv::Txn& t, const Hash32& h) const { return t.get(A_BODIES, h.span()).has_value(); }
     MainHeader need_main(const bt::kv::Txn& t, const Hash32& h) const;
-    uint32_t need_height(const bt::kv::Txn& t, const Hash32& h) const;
     Header need_header(const bt::kv::Txn& t, const Hash32& h) const;
+
+private:
+    uint32_t need_height(const bt::kv::Txn& t, const Hash32& h) const;
     void put_bmm_results(bt::kv::Txn& t, const Hash32& side, const std::map<Hash32, BmmResult>& r) const;
     /** ancestor search used by better_tip: first ancestor whose prev_main is a strict
      *  ancestor of main_ancestor; returns its height (and the work of the main block

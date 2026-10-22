@@ -8,6 +8,7 @@
 
 #include <thunder/archive.h>
 #include <thunder/net.h>
+#include <thunder/side_tips.h>
 #include <thunder/state.h>
 
 // The P2P hardening shared with the sidechain template (rate_key, ban_active, HeadersBudgets).
@@ -40,6 +41,7 @@ struct NodeConfig {
     std::vector<std::string> server_names;
     bool use_seeds = true;
     bool p2p = true;
+    bool rebuild_side_tips = false; // --bt-rebuild-side-tips
 };
 
 struct PeerView {
@@ -85,12 +87,22 @@ public:
     bool forget_peer(const std::string& hostport);
     /** Ensure mainchain header/block infos for `main` and its ancestors. */
     bool request_mainchain_ancestor_infos(const Hash32& main);
+    /** Move the side tips to main_tip (mainchain_task.rs sync_side_tips_to_tip) and, when
+     *  that (dis)connected mainchain blocks, run net_task.rs handle_mainchain_block_event.
+     *  False when the side tips cannot follow (their mainchain task fails the same way and
+     *  retries); the mainchain headers must be stored. */
+    bool sync_to_mainchain_tip(const Hash32& main_tip);
+    /** Tests: run the chain logic on a store without starting the node's threads. */
+    void attach_store(std::unique_ptr<bt::kv::Store> s) { store_ = std::move(s); }
+    /** Store a header and body as a peer's GetBlock answer does, without reorging. */
+    void receive_block(const Header& h, const Body& b);
     /** Mempool selection for templates (get_transactions(1000)). */
     std::pair<std::vector<std::pair<AuthorizedTransaction, std::vector<Output>>>, uint64_t> mempool_transactions(size_t n);
 
     bt::enforcer::Client& enforcer() { return *enforcer_; }
     Archive& archive() { return archive_; }
     State& state() { return state_; }
+    SideTips& side_tips() { return side_tips_; }
     std::recursive_mutex& lock() { return mu_; }
     bt::kv::Store& store() { return *store_; }
     const NodeConfig& config() const { return cfg_; }
@@ -103,6 +115,7 @@ private:
     std::unique_ptr<bt::kv::Store> store_;
     State state_;
     Archive archive_;
+    SideTips side_tips_;
     std::unique_ptr<bt::enforcer::Client> enforcer_;
     std::recursive_mutex mu_;
     std::map<Hash32, AuthorizedTransaction> mempool_;
@@ -120,7 +133,10 @@ private:
     void mempool_delete(const Hash32& txid);
     void mempool_regenerate_proofs(bt::kv::Txn& t);
     void mainchain_loop();
-    void sync_to_mainchain_tip(const Hash32& main_tip);
+    void handle_mainchain_block_event();
+    bool catch_up_mainchain();
+    void put_body_(bt::kv::Txn& t, const Hash32& h, const Body& b);
+    void delete_body_(bt::kv::Txn& t, const Hash32& h);
 
     // P2P
     struct Peer {
