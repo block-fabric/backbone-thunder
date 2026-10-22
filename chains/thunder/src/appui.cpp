@@ -804,14 +804,14 @@ struct AppLayer::Impl {
                 const Address to{side_address(p[0], "dest")};
                 const uint64_t value{p[1].getInt<uint64_t>()}, fee{p[2].getInt<uint64_t>()};
                 if (value == 0) throw HostError(bt::appui::HOST_INVALID_REQUEST, "Nothing to send");
-                if (value + fee < value) throw HostError(bt::appui::HOST_INVALID_REQUEST, "amount overflow");
-                enough(value + fee);
+                const uint64_t total{bt::appui::spend_total({value, fee})};
+                enough(total);
                 Question q;
                 q.title = "Send " + coins(value);
                 q.message = addresses().contains(to) ? "To an address of this wallet." : "To this address on Thunder. A payment cannot be taken back.";
                 q.accept = "Send";
                 q.kind = "send";
-                q.rows = {{"To", to.to_base58(), "address"}, {"Amount", coins(value), "amount"}, {"Fee", coins(fee), "amount"}, {"Total", coins(value + fee), "total"}};
+                q.rows = {{"To", to.to_base58(), "address"}, {"Amount", coins(value), "amount"}, {"Fee", coins(fee), "amount"}, {"Total", coins(total), "total"}};
                 return q;
             },
             [this](const UniValue& p) { return l2l_call("create_transfer", p); }};
@@ -830,7 +830,7 @@ struct AppLayer::Impl {
                 if (dests.size() == 0) throw HostError(bt::appui::HOST_INVALID_REQUEST, "No recipient");
                 if (dests.size() > 2000) throw HostError(bt::appui::HOST_INVALID_REQUEST, "At most 2000 recipients in one payment");
                 const uint64_t fee{p[1].getInt<uint64_t>()};
-                uint64_t total{fee};
+                uint64_t total{bt::appui::spend_total({fee})};
                 Question q;
                 q.kind = "send-many";
                 q.accept = "Send";
@@ -839,8 +839,7 @@ struct AppLayer::Impl {
                     const Address a{side_address(UniValue{dests.getKeys()[i]}, "dest")};
                     if (!seen.insert(a).second) throw HostError(bt::appui::HOST_INVALID_REQUEST, "invalid entry: found duplicate key");
                     const uint64_t v{dests.getValues()[i].getInt<uint64_t>()};
-                    if (total + v < total) throw HostError(bt::appui::HOST_INVALID_REQUEST, "amount overflow");
-                    total += v;
+                    total = bt::appui::spend_total({total, v});
                     q.rows.push_back({"To", a.to_base58(), "address"});
                     q.rows.push_back({"Amount", coins(v), "amount"});
                 }
@@ -858,8 +857,7 @@ struct AppLayer::Impl {
                 const bt::btc::Address to{main_address(p[0])};
                 const uint64_t value{p[1].getInt<uint64_t>()}, fee{p[2].getInt<uint64_t>()}, main_fee{p[3].getInt<uint64_t>()};
                 if (value == 0) throw HostError(bt::appui::HOST_INVALID_REQUEST, "Nothing to withdraw");
-                const uint64_t total{value + fee + main_fee};
-                if (total < value) throw HostError(bt::appui::HOST_INVALID_REQUEST, "amount overflow");
+                const uint64_t total{bt::appui::spend_total({value, fee, main_fee})};
                 enough(total);
                 Question q;
                 q.title = "Withdraw " + coins(value) + " to eCash";
@@ -878,6 +876,7 @@ struct AppLayer::Impl {
                 const Address to{side_address(p[0], "address")};
                 const uint64_t value{p[1].getInt<uint64_t>()}, fee{p[2].getInt<uint64_t>()};
                 if (value == 0) throw HostError(bt::appui::HOST_INVALID_REQUEST, "Nothing to deposit");
+                const uint64_t total{bt::appui::spend_total({value, fee})};
                 const bool ours{addresses().contains(to)};
                 Question q;
                 q.title = "Deposit " + coins(value) + " into Thunder";
@@ -890,7 +889,7 @@ struct AppLayer::Impl {
                 q.accept = "Deposit";
                 q.kind = "deposit";
                 q.rows = {{"Into (Thunder)", to.to_base58(), "address"}, {"Amount", coins(value), "amount"}, {"Fee on eCash", coins(fee), "amount"},
-                          {"Total (paid on eCash)", coins(value + fee), "total"}};
+                          {"Total (paid on eCash)", coins(total), "total"}};
                 return q;
             },
             [this](const UniValue& p) {
@@ -905,7 +904,7 @@ struct AppLayer::Impl {
                 return out;
             },
             [this](const UniValue& p) {
-                const uint64_t bid{p.size() > 0 ? p[0].getInt<uint64_t>() : App::EMPTY_BLOCK_BMM_BRIBE};
+                const uint64_t bid{bt::appui::spend_total({p.size() > 0 ? p[0].getInt<uint64_t>() : App::EMPTY_BLOCK_BMM_BRIBE})};
                 Question q;
                 q.title = "Merge-mine a block of Thunder";
                 q.message = "Asks eCash's miners to include the next block of Thunder (blind merged mining), with a bid paid on eCash by the "

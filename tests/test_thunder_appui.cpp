@@ -265,6 +265,42 @@ TEST(appui_wallet_ownership_only_for_a_wallet_reader)
     layer.stop();
 }
 
+TEST(appui_spends_refused_when_their_sum_wraps_or_passes_max_money)
+{
+    Harness h("overflow");
+    h.wallet->set_seed_from_mnemonic("abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about");
+    AppLayer layer(*h.app, "regtest", h.dir, options());
+    std::string err;
+    CHECK(layer.start(err));
+    const auto overflow{[&layer](const std::string& method, const std::string& params) {
+        UniValue p;
+        CHECK(p.read(params));
+        try {
+            layer.host().describe(method, p, "__cookie__"); // a caller of every spend
+        } catch (const std::exception& e) {
+            const bool ok{std::string{e.what()}.find("amount overflow") != std::string::npos};
+            if (!ok) std::fprintf(stderr, "  %s %s: %s\n", method.c_str(), params.c_str(), e.what());
+            return ok;
+        }
+        return false;
+    }};
+    // 2^63 + 2^63 + (2^63 + 1) wraps past the amount and still looks larger than it: refused before any question.
+    CHECK(overflow("create_withdrawal", R"(["bcrt1qqypqxpq9qcrsszg2pvxq6rs0zqg3yyc5phstwt", 9223372036854775808, 9223372036854775808, 9223372036854775809])"));
+    CHECK(overflow("create_withdrawal", R"(["bcrt1qqypqxpq9qcrsszg2pvxq6rs0zqg3yyc5phstwt", 18446744073709551606, 5, 20])"));
+    CHECK(overflow("create_transfer", R"(["4XrMw8bmnhchFspSyP4XRUuB5vaR", 18446744073709551615, 1])"));
+    CHECK(overflow("create_transfer", R"(["4XrMw8bmnhchFspSyP4XRUuB5vaR", 2100000000000001, 0])"));
+    CHECK(overflow("create_transfer_many", R"([{"4XrMw8bmnhchFspSyP4XRUuB5vaR": 9223372036854775808, "4TXCaVb28BDdZbpF93Gg4GDMhxd9": 9223372036854775808}, 1000])"));
+    CHECK(overflow("create_deposit", R"(["4XrMw8bmnhchFspSyP4XRUuB5vaR", 18446744073709551615, 1000])"));
+    CHECK(overflow("mine", "[2100000000000001]"));
+    // The wallet itself (LayerTwo's create_withdrawal, without the app): each addition checked too.
+    bt::jsonrpc::Server l2l;
+    register_rpc(l2l, *h.app, true, true);
+    const std::string r{reply(l2l, "create_withdrawal", R"(["bcrt1qqypqxpq9qcrsszg2pvxq6rs0zqg3yyc5phstwt", 9223372036854775808, 9223372036854775808, 9223372036854775809])")};
+    if (r.find("amount overflow") == std::string::npos) std::fprintf(stderr, "  %s\n", r.c_str());
+    CHECK(r.find("amount overflow") != std::string::npos);
+    layer.stop();
+}
+
 TEST(appui_manifest_is_the_nodes)
 {
     Harness h("manifest");

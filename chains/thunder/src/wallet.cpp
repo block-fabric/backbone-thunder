@@ -191,6 +191,8 @@ Transaction Wallet::create_transaction_many(const std::map<Address, uint64_t>& d
 
 Transaction Wallet::create_withdrawal(const bt::btc::Address& main_address, uint64_t value, uint64_t main_fee, uint64_t fee)
 {
+    // Each addition checked (two can wrap past value and still look larger than it), as create_transaction_many does.
+    if (value + fee < value || value + fee + main_fee < value + fee) throw std::runtime_error("amount overflow");
     auto [total, coins] = select_coins(value + fee + main_fee);
     uint64_t change = total - value - fee - main_fee;
     auto [ins, proof] = inputs_with_proof(node_, coins);
