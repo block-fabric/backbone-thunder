@@ -107,6 +107,15 @@ halt on a missing commitment is not reproduced (`REPRODUCE_SIDE_TIPS_HALT = fals
 decision 2026-10-22, as BitNames, BitAssets and zSide). `--bt-rebuild-side-tips` rebuilds the
 index from the active mainchain. Tests: `tests/test_thunder_side_tips.cpp`.
 
+Regtest pair (`tests/regtest/thunder_reorg_regtest.py full`, 2026-10-22: their thunder-rust
+0.18.2 `thunder_app` built from 244e20f next to ours, local only): 6 blocks mined alternately,
+then the mainchain blocks holding the BMM commitments of the last two sidechain blocks reorged
+away: both nodes keep height 6 and the same tip (their node was restarted after the reorg, as
+were electrs and the enforcer); the next BMM on the kept tip fails on both, then blocks on the
+last surviving ancestor replace the kept ones on both. 169 raw RPC comparisons, 2 differences,
+both `get_bmm_inclusions` of a kept block (RPC only): ours lacked the stale main block until
+restarted services re-sent it, then listed the two main blocks in another order.
+
 ## Remaining for Thunder
 
 1. Live differential runs on the test machine (doc/differential-tests.md), especially RPC
