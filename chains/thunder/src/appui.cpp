@@ -1257,8 +1257,10 @@ bool AppLayer::start(std::string& err)
         const std::string id{str_param(p, "id")};
         auto phrase{m.phrases.get(id)};
         if (!phrase) throw HostError(bt::appui::HOST_INVALID_REQUEST, "This new phrase is not known any more (5 minutes): make another");
+        const bt::appui::WipeOnExit wipe_phrase{*phrase};
         if (m.wallet.has_seed()) throw HostError(bt::appui::RPC_WALLET_ERROR, "This wallet has a backup phrase already");
         Question q;
+        const bt::appui::WipeOnExit wipe_words{q.details};
         q.title = "Your backup phrase";
         q.message = "Write these 12 words down, in order, on paper, and keep them safe. They are the only way to get this wallet back. "
                     "Anyone who has them can take its coins. They are not shown to the app's pages.";
@@ -1274,9 +1276,10 @@ bool AppLayer::start(std::string& err)
     P["dropin.seed.create"] = {"set_seed_from_mnemonic"};
     H["dropin.seed.restore"] = [&m](const UniValue& p, HostEnv& env) {
         std::string phrase{str_param(p, "phrase")};
+        const bt::appui::WipeOnExit wipe_typed{phrase};
         auto parsed{bt::hd::parse_mnemonic(phrase)};
-        sodium_memzero(phrase.data(), phrase.size());
-        if (!parsed) throw HostError(bt::appui::HOST_INVALID_REQUEST, bt::hd::mnemonic_error(str_param(p, "phrase")));
+        if (!parsed) throw HostError(bt::appui::HOST_INVALID_REQUEST, bt::hd::mnemonic_error(phrase));
+        const bt::appui::WipeOnExit wipe_parsed{*parsed};
         if (m.wallet.has_seed()) throw HostError(bt::appui::RPC_WALLET_ERROR, "This wallet has a backup phrase already");
         auto seed{bt::hd::mnemonic_to_seed(*parsed)};
         const std::string fp{bt::appui::seed_fingerprint(seed.span())};
@@ -1295,7 +1298,9 @@ bool AppLayer::start(std::string& err)
     H["dropin.seed.show"] = [&m](const UniValue&, HostEnv& env) {
         auto phrase{m.kept_phrase()};
         if (!phrase) throw HostError(bt::appui::RPC_WALLET_ERROR, "This wallet's phrase was not set through the app: keep the backup you made then");
+        const bt::appui::WipeOnExit wipe_phrase{*phrase};
         Question q;
+        const bt::appui::WipeOnExit wipe_words{q.details};
         q.title = "Your backup phrase";
         q.message = "Make sure nobody can see your screen. Anyone who has these words can take this wallet's coins.";
         q.details = Impl::words_block(*phrase);
@@ -1304,7 +1309,6 @@ bool AppLayer::start(std::string& err)
         q.level = "warning";
         q.kind = "phrase.show";
         env.ask(q);
-        sodium_memzero(phrase->data(), phrase->size());
         return UniValue{true};
     };
     H["dropin.seed.save"] = [&m](const UniValue& p, HostEnv& env) {
@@ -1312,6 +1316,7 @@ bool AppLayer::start(std::string& err)
         const auto file{env.file(path, true)};
         auto phrase{m.kept_phrase()};
         if (!phrase) throw HostError(bt::appui::RPC_WALLET_ERROR, "This wallet's phrase was not set through the app: keep the backup you made then");
+        const bt::appui::WipeOnExit wipe_phrase{*phrase};
         Question q;
         q.title = "Save your backup phrase to a file";
         q.message = "Anyone who can read this file can take this wallet's coins. Keep it somewhere only you can reach, off this computer if you can.";
@@ -1319,14 +1324,14 @@ bool AppLayer::start(std::string& err)
         q.accept = "Save";
         q.kind = "phrase.save";
         if (!env.ask(q).accepted) throw HostError(bt::appui::HOST_CANCELLED, "Cancelled");
+        std::string content{"Thunder backup phrase (BIP-39, " + std::string{m.wallet.variant() == bt::hd::Variant::V0_18_0 ? "v0.18.0" : "v0.18.1"} +
+                                                    " keys)\n" + *phrase + "\n"};
+        const bt::appui::WipeOnExit wipe_content{content};
         try {
-            bt::appui::ChosenFiles::write(file, "Thunder backup phrase (BIP-39, " + std::string{m.wallet.variant() == bt::hd::Variant::V0_18_0 ? "v0.18.0" : "v0.18.1"} +
-                                                    " keys)\n" + *phrase + "\n");
+            bt::appui::ChosenFiles::write(file, content);
         } catch (const std::runtime_error& e) {
-            sodium_memzero(phrase->data(), phrase->size());
             throw HostError(std::string{"The file chosen cannot be written: "} + e.what());
         }
-        sodium_memzero(phrase->data(), phrase->size());
         return UniValue{true};
     };
     // ---- Thunder's own: how busy the chain is.
@@ -1401,7 +1406,7 @@ UniValue AppLayer::manifest() const
         host.push_back(h);
     o.pushKV("host", host);
     UniValue protocol{UniValue::VARR};
-    for (const char* p : {"webuihost", "describeconfirmation", "webuievents", "webuichosenfile"}) protocol.push_back(p);
+    for (const char* p : {"webuihost", "describeconfirmation", "webuievents", "webuichosenfile", "appserverproof"}) protocol.push_back(p);
     o.pushKV("protocol", protocol);
     return o;
 }
