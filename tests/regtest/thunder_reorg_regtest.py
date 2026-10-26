@@ -8,6 +8,7 @@ sidechain blocks are reorged away: both nodes must keep those sidechain blocks (
 rule), and mining must go on identically on both.
 
     thunder_reorg_regtest.py full   # up, blocks, reorg, more blocks, whole history, down
+    thunder_reorg_regtest.py names  # our name in the QUIC certificate: we dial them, then they dial us
     thunder_reorg_regtest.py down   # stop exactly the recorded PIDs
 
 Local only. Binaries: $SKY/ext/... (see BIN). Ports TH_BASE.. TH_BASE+19 (default 49560).
@@ -148,15 +149,16 @@ OURS = Side("ours", P["our_rpc"])
 NODES = [THEIRS, OURS]
 
 
-def start_node(which):
+def start_node(which, dial=True):
     d = DIR / which
     seedf = DIR / f"{which}.mnemonic"
     seedf.write_text(MNEMONIC[which])
     p2p, rpc, peer = (P["their_p2p"], P["their_rpc"], P["our_p2p"]) if which == "theirs" else (P["our_p2p"], P["our_rpc"], P["their_p2p"])
     spawn(which, [BIN[which], "--headless", "--datadir", d, "--network", "regtest",
                   "--mainchain-grpc-url", f"http://127.0.0.1:{P['enf_grpc']}", "--net-addr", f"127.0.0.1:{p2p}",
-                  "--rpc-addr", f"127.0.0.1:{rpc}", "--private-rpc-addr", f"127.0.0.1:{rpc}", "--add-peer", f"127.0.0.1:{peer}",
-                  "--mnemonic-seed-phrase-path", seedf, "--log-level", "info", "--log-level-file", "debug"])
+                  "--rpc-addr", f"127.0.0.1:{rpc}", "--private-rpc-addr", f"127.0.0.1:{rpc}"]
+          + (["--add-peer", f"127.0.0.1:{peer}"] if dial else [])
+          + ["--mnemonic-seed-phrase-path", seedf, "--log-level", "info", "--log-level-file", "debug"])
     s = THEIRS if which == "theirs" else OURS
     wait_for(lambda: s.call("getblockcount") is not None, f"{which} RPC", 180, 1)
 
@@ -227,7 +229,7 @@ def enforcer_mine(n=1):
         grpc("MiningService/GenerateToAddress", {"address": STATE["enf_addr"], "blocks": 1}, timeout=300)
 
 
-def up():
+def up(dial=("theirs", "ours")):
     if any(alive(p) for p in pids().values()):
         sys.exit("already running")
     shutil.rmtree(DIR, ignore_errors=True)
@@ -265,8 +267,8 @@ def up():
         return any(s.get("sidechainNumber") == SLOT for s in grpc("ValidatorService/GetSidechains").get("sidechains", []))
     wait_for(active, f"slot {SLOT} active", 600, 0.1)
     log(f"slot {SLOT} active at mainchain height", ecash("getblockcount"))
-    start_node("theirs")
-    start_node("ours")
+    start_node("theirs", "theirs" in dial)
+    start_node("ours", "ours" in dial)
     for s in NODES:
         STATE[f"{s.name}_addr"] = s.call("get_new_address")
     log("nodes up:", STATE)
@@ -421,6 +423,50 @@ def full():
     log(f"checks {CHECKS['n']}, diffs {CHECKS['diff']}")
 
 
+def peer_at(s, port):
+    return [p for p in s.call("list_peers") if p["address"] == f"127.0.0.1:{port}" and p.get("status") == "Connected"]
+
+
+def names_check(dialer):
+    """One connection, `dialer` dials: it must come up on both sides (theirs accepts our certificate, whose CN now
+    names us), we name them "unknown (upstream)" (rcgen's CN) or, inbound, "unknown"; then a block mined by the
+    side that was dialed must reach the dialer over it."""
+    ok = True
+    ours_peer = wait_for(lambda: peer_at(OURS, P["their_p2p"]), "ours: theirs connected", 120, 1)
+    theirs_peer = wait_for(lambda: peer_at(THEIRS, P["our_p2p"]), "theirs: ours connected", 120, 1)
+    want = "unknown (upstream)" if dialer == "ours" else "unknown"
+    log(f"  {dialer} dialed: ours list_peers {ours_peer}; theirs list_peers {theirs_peer}")
+    if [p.get("name") for p in ours_peer] != [want]:
+        log(f"  FAIL: ours names theirs {[p.get('name') for p in ours_peer]}, want [{want!r}]")
+        ok = False
+    if any("name" in p for p in theirs_peer):
+        log("  FAIL: theirs list_peers has a name field")
+        ok = False
+    mine_and_compare(THEIRS if dialer == "ours" else OURS)
+    return ok
+
+
+def names():
+    """Our name in the QUIC certificate's CN; no message changes, so the upstream node must not notice."""
+    results = {}
+    up(dial=("ours",))
+    log(f"== we dial them; our certificate CN is not checked by them (logged by ours: {our_cn()})")
+    results["we dial them"] = names_check("ours")
+    stop_node("ours")
+    stop_node("theirs")
+    start_node("theirs", True)
+    start_node("ours", False)
+    log("== they dial us: theirs must accept our certificate")
+    results["they dial us"] = names_check("theirs")
+    log(f"names: {results}; checks {CHECKS['n']}, diffs {CHECKS['diff']}")
+    return all(results.values()) and CHECKS["diff"] == 0
+
+
+def our_cn():
+    """Our startup line names us (the certificate's CN is "<Name> <version> (Backbone drop-in)")."""
+    lines = [ln for ln in (DIR / "logs" / "ours.out").read_text(errors="replace").splitlines() if " starting: " in ln]
+    return lines[-1].split(" starting: ")[0].split(" INFO ")[-1].strip() if lines else "?"
+
 if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else "help"
     if cmd == "full":
@@ -429,6 +475,14 @@ if __name__ == "__main__":
         finally:
             (DIR / "full.log").write_text("\n".join(LOG))
             down()
+    elif cmd == "names":
+        ok = False
+        try:
+            ok = names()
+        finally:
+            (DIR / "names.log").write_text("\n".join(LOG))
+            down()
+        sys.exit(0 if ok else 1)
     elif cmd == "down":
         down()
     else:
