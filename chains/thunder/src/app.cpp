@@ -54,12 +54,72 @@ BlockTemplate App::build_block_template(std::optional<uint64_t> fee)
     bt_.body = Body::from_authorized(ats, bt_.body.coinbase);
     std::vector<FilledTransaction> filled;
     for (size_t i = 0; i < txs.size(); i++) filled.push_back(FilledTransaction{&bt_.body.transactions[i], txs[i].second});
-    auto mr = compute_merkle_root(bt_.body.coinbase, filled);
+    const bool v019 = node.state().v019();
+    auto mr = v019 ? compute_merkle_root(bt_.body.coinbase, filled, bt_.body.authorizations) : compute_merkle_root(bt_.body.coinbase, filled);
     if (!mr) throw app_error("ComputeMerkleRoot");
     bt_.header.merkle_root = *mr;
     bt_.header.prev_side_hash = prev_side;
     bt_.header.prev_main_hash = prev_main;
-    {
+    if (v019) {
+        // app.rs compute_roots (v0.19): the accumulator after the 2WPD this block would connect, its transactions (their
+        // proofs made again against it), and the bundle construction; dry-run in a transaction that is dropped
+        std::lock_guard<std::recursive_mutex> l(node.lock());
+        Txn t(node.store());
+        auto& st = node.state();
+        auto& ar = node.archive();
+        std::optional<Hash32> tip_prev_main;
+        if (auto tp = st.tip(t)) tip_prev_main = ar.header(t, *tp)->prev_main_hash;
+        bt::mainchain::TwoWayPegData d;
+        std::vector<uint32_t> heights;
+        {
+            std::vector<std::pair<Hash32, uint32_t>> anc; // newest first
+            Hash32 cur = prev_main;
+            while (!cur.is_zero() && cur != tip_prev_main) {
+                auto mh = ar.main_header(t, cur);
+                if (!mh) throw app_error("NoMainHeaderInfo " + bt::hex_encode_rev(cur.span()));
+                anc.emplace_back(cur, mh->height);
+                cur = mh->prev;
+            }
+            for (auto it = anc.rbegin(); it != anc.rend(); ++it) {
+                auto bi = ar.main_block_info(t, it->first);
+                if (bi.events.empty()) continue;
+                d.block_info.emplace_back(it->first, bi);
+                heights.push_back(it->second);
+            }
+        }
+        auto next_h = st.height(t);
+        uint32_t next_height = next_h ? *next_h + 1 : 0;
+        st.connect_2wpd(t, d, heights);
+        auto acc = st.accumulator(t);
+        for (auto& tx : bt_.body.transactions) {
+            std::vector<bt::utreexo::NodeHash> targets;
+            for (auto& [op, uh] : tx.inputs) targets.push_back(bt::utreexo::NodeHash::some(uh));
+            auto p = acc.prove(targets);
+            if (!p) throw app_error("utreexo: cannot prove inputs");
+            tx.proof = *p;
+        }
+        AccumulatorDiff diff;
+        Hash32 cbtxid = bt_.header.coinbase_txid();
+        for (uint32_t v = 0; v < bt_.body.coinbase.outputs.size(); v++)
+            diff.insert(bt::utreexo::NodeHash::some(pointed_output_hash(OutPoint{OutPoint::Coinbase, cbtxid, v}, bt_.body.coinbase.outputs[v])));
+        for (auto& tx : bt_.body.transactions) {
+            Hash32 txid = tx.txid();
+            for (auto& [op, uh] : tx.inputs) diff.remove(bt::utreexo::NodeHash::some(uh));
+            for (uint32_t v = 0; v < tx.outputs.size(); v++) diff.insert(bt::utreexo::NodeHash::some(pointed_output_hash(OutPoint{OutPoint::Regular, txid, v}, tx.outputs[v])));
+        }
+        std::vector<bt::utreexo::NodeHash> ins, dels;
+        diff.split(ins, dels);
+        if (auto e = acc.modify(ins, dels)) throw app_error("utreexo: " + *e);
+        std::vector<FilledTransaction> filled2;
+        for (size_t i = 0; i < txs.size(); i++) filled2.push_back(FilledTransaction{&bt_.body.transactions[i], txs[i].second});
+        auto cd = st.simulate_withdrawal_bundle_construction(t, next_height, filled2, bt_.body.coinbase, cbtxid);
+        ins.clear();
+        dels.clear();
+        cd.split(ins, dels);
+        if (auto e = acc.modify(ins, dels)) throw app_error("utreexo: " + *e);
+        bt_.header.roots = acc.get_roots();
+        t.abort();
+    } else {
         std::lock_guard<std::recursive_mutex> l(node.lock());
         Txn t(node.store());
         bt::utreexo::MemForest acc;
@@ -131,9 +191,9 @@ static std::set<Address> parse_addresses(const UniValue& v)
     return s;
 }
 
-static UniValue openapi_schema()
+static UniValue openapi_schema(bool v019)
 {
-    // Their utoipa document, byte for byte (MIT, thunder-rust v0.18.2); parsed once.
+    // Their utoipa document, byte for byte (MIT, thunder-rust v0.18.2, or v0.19.1 under its rules); parsed once.
     static const UniValue doc = [] {
         UniValue d;
         if (!d.read(std::string_view{
@@ -142,14 +202,22 @@ static UniValue openapi_schema()
             throw std::runtime_error("openapi_schema.inc does not parse");
         return d;
     }();
-    return doc;
+    static const UniValue doc19 = [] {
+        UniValue d;
+        if (!d.read(std::string_view{
+#include "openapi_schema_v019.inc"
+            }))
+            throw std::runtime_error("openapi_schema_v019.inc does not parse");
+        return d;
+    }();
+    return v019 ? doc19 : doc;
 }
 
 void register_rpc(bt::jsonrpc::Server& s, App& app, bool public_api, bool private_api)
 {
     Node& n = app.node;
     Wallet& w = app.wallet;
-    s.add("openapi_schema", {}, 0, [](const Params&) { return openapi_schema(); });
+    s.add("openapi_schema", {}, 0, [&n](const Params&) { return openapi_schema(n.state().v019()); });
     s.add("get_block", {"block_hash", "verbose"}, 1, [&n](const Params& p) -> UniValue {
         Hash32 h = json::parse_hash(p[0]);
         bool verbose = p[1].isBool() && p[1].get_bool();

@@ -1,5 +1,5 @@
 {
-  "comment": "Thunder on eCash, our app of the LayerTwo-compatible drop-in node (doc/app.md): read by core/cmake/BtDesktopApp.cmake (the host's chainconfig.h) and by the interface (chain/config.ts). The networks are the node's: main = betanet (eCash's betanet), test = forknet; slot 9 as on eCash.",
+  "comment": "Thunder on eCash, our app of the LayerTwo-compatible drop-in node (doc/app.md): read by core/cmake/BtDesktopApp.cmake (the host's chainconfig.h) and by the interface (chain/config.ts). The networks are the node's: main = mainnet (eCash mainnet; betanet, eCash's betanet, has the same address forms), test = forknet; slot 9 as on eCash.",
   "name": "Thunder",
   "bin": "thunder",
   "role": "sidechain",

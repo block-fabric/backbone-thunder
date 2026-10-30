@@ -42,6 +42,14 @@ struct NodeConfig {
     bool use_seeds = true;
     bool p2p = true;
     bool rebuild_side_tips = false; // --bt-rebuild-side-tips
+    /** The consensus rules: v0.19.1's on mainnet, v0.18.2's elsewhere (--bt-consensus overrides, for tests). */
+    std::optional<Rules> rules;
+    /** How often the mainchain tip is asked for (--bt-mainchain-poll-secs). */
+    unsigned mainchain_poll_ms = 2000;
+    /** A pause between the GetBlockInfo batches of a mainchain sync (--bt-mainchain-sync-pause-ms), to spare a busy
+     *  enforcer; 0 = none (theirs). */
+    unsigned mainchain_sync_pause_ms = 0;
+    Rules effective_rules() const { return rules ? *rules : network == net::Network::Mainnet ? Rules::V0_19 : Rules::V0_18; }
 };
 
 struct PeerView {
@@ -109,6 +117,10 @@ public:
     bt::enforcer::Client& enforcer() { return *enforcer_; }
     Archive& archive() { return archive_; }
     State& state() { return state_; }
+    /** The height of the mainchain tip the side tips follow (v0.19 deposit maturity of a new transaction); 0 if none. */
+    uint32_t main_tip_height(const bt::kv::Txn& t) const;
+    /** Whether a wallet may spend `op` in the next block (v0.19 maturity; always under v0.18). */
+    bool spendable_next_block(const OutPoint& op);
     SideTips& side_tips() { return side_tips_; }
     std::recursive_mutex& lock() { return mu_; }
     bt::kv::Store& store() { return *store_; }
@@ -126,7 +138,7 @@ private:
     std::unique_ptr<bt::enforcer::Client> enforcer_;
     std::recursive_mutex mu_;
     std::map<Hash32, AuthorizedTransaction> mempool_;
-    std::map<std::array<uint8_t, 37>, Hash32> mempool_spent_;
+    std::map<std::array<uint8_t, 41>, Hash32> mempool_spent_;
     std::atomic<bool> running_{false};
     std::thread main_thread_, net_thread_, worker_thread_, serve_thread_;
     std::mutex main_mu_;

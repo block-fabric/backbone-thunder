@@ -14,8 +14,21 @@ std::array<uint8_t, 4> magic_bytes(Network n)
     case Network::Signet: m[3] |= 1; break;
     case Network::Forknet: m[3] |= 2; break;
     case Network::Betanet: m[3] |= 4; break;
+    case Network::Mainnet: m[3] |= 5; break; // v0.19.0 685dc52: 0b0000_0101 (Betanet's 0b0100 retired)
     }
     return m;
+}
+
+const char* network_name(Network n)
+{
+    switch (n) {
+    case Network::Betanet: return "betanet";
+    case Network::Forknet: return "forknet";
+    case Network::Regtest: return "regtest";
+    case Network::Signet: return "signet";
+    case Network::Mainnet: return "mainnet";
+    }
+    return "?";
 }
 
 static void enc_peer_state(Writer& w, const PeerState& p)

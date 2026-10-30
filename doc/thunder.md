@@ -1,6 +1,7 @@
 # Thunder (eCash slot 9): drop-in client
 
-`thunder` replaces thunder-rust's `thunder_app` v0.18.2 on eCash betanet. Consensus,
+`thunder` replaces thunder-rust's `thunder_app` v0.19.1 on eCash mainnet (`--network mainnet`, the default since
+v0.19, as theirs) and v0.18.2 on eCash betanet (`--network betanet`; v0.19 has no betanet). Consensus,
 P2P, mainchain link, CLI flags and JSON-RPC follow thunder-rust tag v0.18.2 (244e20f), the
 rules every betanet block was made under (study Part II Thunder §1).
 
@@ -127,3 +128,32 @@ restarted services re-sent it, then listed the two main blocks in another order.
    scans all UTXOs each block (as theirs does).
 5. Known-peers learning from inbound peers; peer scoring beyond bans; gRPC GOAWAY handling.
 6. Unified-app node kind and pages; seeding from our unified seed (user decision).
+
+
+## Mainnet: the v0.19.1 rules (Rules::V0_19)
+
+LayerTwo added mainnet in thunder-rust v0.19.0 (685dc52) and dropped betanet from its networks, with a set of
+consensus changes that hold on every network v0.19 has. Our node follows them where theirs does: on `--network
+mainnet` (eCash mainnet, slot 9, proposed in block 976,314, activated at 978,324). Betanet keeps v0.18.2's rules, the
+ones its live nodes run. `--bt-consensus v0.19|v0.18` overrides the choice (tests on regtest).
+
+| Change | Upstream | Ours |
+|---|---|---|
+| Network | `Mainnet` magic `85 18 95 05` (prefix, `\| 0b0101`), seeds `seed.ecash.{drivecha.in,eu.com,ninja}:4009`, P2P version 0.19.1 | `net.cpp`, `node.cpp` |
+| Merkle root | `HashComponents` + `blake3(borsh(authorizations))` (3a714ea) | `compute_merkle_root(cb, txs, auths)` |
+| Maturity | coinbase outputs after 50 sidechain blocks, deposits after 50 mainchain blocks of `prev_main` (d99a70c); tables `coinbase_height`, `deposit_mainchain_height` | `State::validate_input_maturity`, the wallet's coin selection skips immature coins |
+| Order of a block | 2WPD, transactions, header, bundle construction; undone in reverse (ec56149) | `Node::connect_tip_`/`disconnect_tip_` |
+| Bundles | built after the transactions, their outputs spent then; withdrawal outputs spendable by transactions; a pending bundle not submitted in 4 blocks dropped; a failed or dropped bundle's outputs recreated at `UnsuccessfulWithdrawal{m6id, height, vout}`; confirming a failed or dropped bundle invalid; header roots after the construction | `State::maybe_create_withdrawal_bundle` and friends |
+| Bundle order | fee density `main_fee / len(script)` first, then `(main_fee, value, address)` | `agg_cmp` |
+| Wealth | outputs recreated from unsuccessful bundles count as inflows | `sidechain_wealth` |
+| Wallet | bip32ish with BLAKE3 for HMAC-SHA512, master context `Thunder seed`, 512-bit reduction (6b5e114) | `bt::hd::Variant::V0_19`, the default on mainnet |
+| RPC | `openapi_schema` of v0.19.1 | `openapi_schema_v019.inc` |
+
+Checks: `tests/test_thunder_v019.cpp` (each change), core `hd_v0_19_blake3_derivation` (known answers from an
+independent implementation); from the BIP-39 vector `abandon … about` our mainnet wallet's first address is
+`3HUkLrWpbvLCHwCtUmVhewwRxzBv`, as thunder-rust v0.19.1's; `tests/regtest/thunder_v019_regtest.py` runs their
+v0.19.1 next to ours on one eCash regtest (deposits, maturity refusals, transfers, a withdrawal bundle built and
+submitted, coinbase maturity, a mainchain reorg, the whole history) and compares every reply byte for byte.
+
+Data folders: one network per folder. A folder synced before this mark existed is taken as betanet's and refused on
+mainnet. `--bt-mainchain-poll-secs` and `--bt-mainchain-sync-pause-ms` space the calls to a shared enforcer.

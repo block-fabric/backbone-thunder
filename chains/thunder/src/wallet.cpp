@@ -145,6 +145,7 @@ std::pair<uint64_t, std::vector<std::pair<OutPoint, Output>>> Wallet::select_coi
     uint64_t total = 0;
     std::vector<std::pair<OutPoint, Output>> sel;
     for (auto& [op, o] : u) {
+        if (!node_.spendable_next_block(op)) continue; // v0.19: immature coinbase outputs and deposits (d99a70c)
         if (o.content.kind == Content::Withdrawal) continue;
         if (total > value) break;
         total += o.get_value();

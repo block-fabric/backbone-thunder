@@ -28,8 +28,8 @@
 
 using namespace thunder;
 
-static const char* VERSION = "0.18.2";
-static const std::string OUR_VERSION = bt::agent() + " (Backbone drop-in; thunder 0.18.2 compatible)";
+static const char* VERSION = "0.19.1";
+static const std::string OUR_VERSION = bt::agent() + " (Backbone drop-in; thunder 0.19.1 compatible on mainnet, 0.18.2 on betanet)";
 
 static std::atomic<bool> g_stop{false};
 static void on_signal(int) { g_stop = true; }
@@ -61,18 +61,19 @@ static void usage()
 {
     std::printf(
         "Usage: thunder [OPTIONS]\n\n"
-        "Options (thunder-rust 0.18.2 compatible):\n"
+        "Options (thunder-rust 0.19.1 compatible; 0.18.2 on betanet):\n"
         "      --add-peer <ADD_PEERS>                 Additional peers to dial on startup, as host:port\n"
         "  -d, --datadir <DATADIR>                    Data directory [default: %s]\n"
         "      --headless                             Accepted; there is no GUI\n"
-        "      --log-dir <LOG_DIR>                    [default: <DATADIR>/logs/v%s]; empty disables file logs\n"
+        "      --log-dir <LOG_DIR>                    [default: <DATADIR>/logs/v<VERSION>]; empty disables file logs\n"
         "      --log-level-file <LOG_LEVEL_FILE>      [default: WARN]\n"
         "      --log-level <LOG_LEVEL>                [default: DEBUG]\n"
         "      --mainchain-grpc-url <URL>             [default: http://localhost:50051]\n"
         "      --mainchain-grpc-ca-cert <PEM>         Extra CA for an https mainchain URL\n"
         "      --mnemonic-seed-phrase-path <PATH>     Path to a mnemonic seed phrase\n"
         "  -n, --net-addr <NET_ADDR>                  [default: 0.0.0.0:4009]\n"
-        "      --network <NETWORK>                    betanet | forknet | regtest | signet [default: betanet]\n"
+        "      --network <NETWORK>                    mainnet | betanet | forknet | regtest | signet [default: mainnet]\n"
+        "                                             (mainnet: eCash mainnet, thunder-rust 0.19.1's rules)\n"
         "      --network-magic <HEX>                  Override the 4-byte network magic\n"
         "  -p, --private-rpc-addr <ADDR>              [default: 127.0.0.1:6009]\n"
         "  -r, --rpc-addr <ADDR>                      [default: 127.0.0.1:6009]\n"
@@ -87,8 +88,12 @@ static void usage()
         "      --bt-no-seeds                          Do not dial the built-in seed peers\n"
         "      --bt-no-p2p                            Disable P2P networking\n"
         "      --bt-rebuild-side-tips                 Drop and rebuild the side-tips index from the mainchain\n"
-        "      --bt-wallet-derivation <v0.18.1|v0.18.0>  Key derivation of an imported mnemonic [default: v0.18.1]\n",
-        default_datadir().c_str(), VERSION);
+        "      --bt-wallet-derivation <v0.19|v0.18.1|v0.18.0>  Key derivation of the wallet's seed\n"
+        "                                             [default: v0.19 on mainnet (BLAKE3), v0.18.1 elsewhere]\n"
+        "      --bt-consensus <v0.19|v0.18>           Consensus rules [default: v0.19 on mainnet, v0.18 elsewhere]\n"
+        "      --bt-mainchain-poll-secs <N>           Ask the mainchain for its tip every N seconds (1-60) [default: 2]\n"
+        "      --bt-mainchain-sync-pause-ms <N>       Pause between the block-info batches of a mainchain sync (0-10000) [default: 0]\n",
+        default_datadir().c_str());
     std::printf("\n%s", bt::appui::usage().c_str());
 }
 
@@ -101,11 +106,12 @@ int main(int argc, char** argv)
 #endif
     NodeConfig cfg;
     cfg.datadir = default_datadir();
+    cfg.network = net::Network::Mainnet; // thunder-rust v0.19's default
     std::optional<std::string> log_dir, wallet_dir, mnemonic_path;
     bt::log::Level log_level = bt::log::Level::Debug, log_level_file = bt::log::Level::Warn;
     bt::quic::SockAddr rpc_addr{"127.0.0.1", net::DEFAULT_RPC_PORT}, private_rpc_addr = rpc_addr;
     bool headless = false;
-    bt::hd::Variant variant = bt::hd::Variant::V0_18_1;
+    std::optional<bt::hd::Variant> variant;
     std::vector<std::string> unknown;
     bt::jsonrpc::Options rpc_opts;
     bt::appui::AppOptions app_opts;
@@ -193,7 +199,8 @@ int main(int argc, char** argv)
             }
         } else if (a == "--network") {
             if (!next(v)) return 2;
-            if (v == "betanet") cfg.network = net::Network::Betanet;
+            if (v == "mainnet") cfg.network = net::Network::Mainnet;
+            else if (v == "betanet") cfg.network = net::Network::Betanet;
             else if (v == "forknet") cfg.network = net::Network::Forknet;
             else if (v == "regtest") cfg.network = net::Network::Regtest;
             else if (v == "signet") cfg.network = net::Network::Signet;
@@ -235,7 +242,37 @@ int main(int argc, char** argv)
             cfg.p2p = false;
         } else if (a == "--bt-wallet-derivation") {
             if (!next(v)) return 2;
-            variant = v == "v0.18.0" ? bt::hd::Variant::V0_18_0 : bt::hd::Variant::V0_18_1;
+            if (v == "v0.19") variant = bt::hd::Variant::V0_19;
+            else if (v == "v0.18.1") variant = bt::hd::Variant::V0_18_1;
+            else if (v == "v0.18.0") variant = bt::hd::Variant::V0_18_0;
+            else {
+                std::fprintf(stderr, "error: invalid value '%s' for '--bt-wallet-derivation'\n", v.c_str());
+                return 2;
+            }
+        } else if (a == "--bt-mainchain-poll-secs") {
+            if (!next(v)) return 2;
+            auto n = bt::parse_u64(v);
+            if (!n || *n < 1 || *n > 60) {
+                std::fprintf(stderr, "error: invalid value '%s' for '--bt-mainchain-poll-secs'\n", v.c_str());
+                return 2;
+            }
+            cfg.mainchain_poll_ms = unsigned(*n * 1000);
+        } else if (a == "--bt-mainchain-sync-pause-ms") {
+            if (!next(v)) return 2;
+            auto n = bt::parse_u64(v);
+            if (!n || *n > 10000) {
+                std::fprintf(stderr, "error: invalid value '%s' for '--bt-mainchain-sync-pause-ms'\n", v.c_str());
+                return 2;
+            }
+            cfg.mainchain_sync_pause_ms = unsigned(*n);
+        } else if (a == "--bt-consensus") {
+            if (!next(v)) return 2;
+            if (v == "v0.19") cfg.rules = Rules::V0_19;
+            else if (v == "v0.18") cfg.rules = Rules::V0_18;
+            else {
+                std::fprintf(stderr, "error: invalid value '%s' for '--bt-consensus'\n", v.c_str());
+                return 2;
+            }
         } else {
             unknown.push_back(argv[i]);
         }
@@ -244,12 +281,14 @@ int main(int argc, char** argv)
         std::fprintf(stderr, "Error: --mainchain-grpc-ca-cert needs an https --mainchain-grpc-url\n");
         return 2;
     }
-    std::string logs = log_dir ? *log_dir : cfg.datadir + "/logs/v" + VERSION;
+    const net::Version nv = net::network_version(cfg.network);
+    std::string logs = log_dir ? *log_dir : cfg.datadir + "/logs/v" + std::to_string(nv.major) + "." + std::to_string(nv.minor) + "." + std::to_string(nv.patch);
     bt::log::set_console_level(log_level);
     bt::log::set_file(logs, log_level_file);
     for (auto& u : unknown) LOG_WARN("ignoring unknown argument '%s'", u.c_str());
     if (!headless) LOG_INFO("no GUI in this build; running headless");
-    LOG_INFO("%s starting: datadir %s, network magic override %s, mainchain %s", OUR_VERSION.c_str(), cfg.datadir.c_str(),
+    LOG_INFO("%s starting: network %s (consensus %s), datadir %s, network magic override %s, mainchain %s", OUR_VERSION.c_str(),
+             net::network_name(cfg.network), cfg.effective_rules() == Rules::V0_19 ? "v0.19.1" : "v0.18.2", cfg.datadir.c_str(),
              cfg.magic_override ? "yes" : "no", cfg.mainchain_grpc_url.c_str());
 
     std::signal(SIGINT, on_signal);
@@ -266,7 +305,9 @@ int main(int argc, char** argv)
         LOG_ERROR("cannot create %s", wdir.c_str());
         return 1;
     }
-    Wallet wallet(wdir + "/backbone-wallet.sqlite", node, variant);
+    // v0.19's wallet derives with BLAKE3 (6b5e114): the default on mainnet; betanet's wallets keep v0.18.1's
+    if (!variant) variant = cfg.network == net::Network::Mainnet ? bt::hd::Variant::V0_19 : bt::hd::Variant::V0_18_1;
+    Wallet wallet(wdir + "/backbone-wallet.sqlite", node, *variant);
     if (mnemonic_path) {
         std::ifstream f(*mnemonic_path);
         std::string m((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
@@ -299,8 +340,7 @@ int main(int argc, char** argv)
     // Our app layer (--bt-app-rpc-port): a server of its own; the LayerTwo servers above are the same with or without it.
     std::unique_ptr<AppLayer> app_layer;
     if (app_opts.enabled) {
-        const char* names[] = {"betanet", "forknet", "regtest", "signet"};
-        app_layer = std::make_unique<AppLayer>(app, names[static_cast<int>(cfg.network)], cfg.datadir, app_opts);
+        app_layer = std::make_unique<AppLayer>(app, net::network_name(cfg.network), cfg.datadir, app_opts);
         if (!app_layer->start(err)) {
             LOG_ERROR("app RPC: %s", err.c_str());
             pub.stop();

@@ -48,12 +48,16 @@ uint64_t Content::get_value() const
     return s < value ? UINT64_MAX : s;
 }
 
-std::array<uint8_t, 37> OutPoint::key() const
+std::array<uint8_t, 41> OutPoint::key() const
 {
-    std::array<uint8_t, 37> k{};
+    std::array<uint8_t, 41> k{};
     k[0] = kind;
     std::memcpy(k.data() + 1, txid.data(), 32);
-    for (int i = 0; i < 4; i++) k[33 + i] = uint8_t(vout >> (8 * i));
+    // borsh field order: (txid, vout), or (m6id, height, vout)
+    const uint32_t a = kind == UnsuccessfulWithdrawal ? height : vout;
+    for (int i = 0; i < 4; i++) k[33 + i] = uint8_t(a >> (8 * i));
+    if (kind == UnsuccessfulWithdrawal)
+        for (int i = 0; i < 4; i++) k[37 + i] = uint8_t(vout >> (8 * i));
     return k;
 }
 
@@ -63,6 +67,8 @@ std::string OutPoint::to_string() const
     case Regular: return "regular " + bt::hex_encode(txid) + " " + std::to_string(vout);
     case Coinbase: return "coinbase " + bt::hex_encode(txid) + " " + std::to_string(vout);
     case Deposit: return "deposit " + bt::hex_encode_rev(txid.span()) + " " + std::to_string(vout);
+    case UnsuccessfulWithdrawal:
+        return "unsuccessful withdrawal " + bt::hex_encode_rev(txid.span()) + " " + std::to_string(height) + " " + std::to_string(vout);
     }
     return {};
 }
@@ -90,6 +96,7 @@ void borsh(Writer& w, const OutPoint& o)
 {
     w.u8(o.kind);
     w.raw(o.txid);
+    if (o.kind == OutPoint::UnsuccessfulWithdrawal) w.u32(o.height); // { m6id, height, vout }
     w.u32(o.vout);
 }
 
@@ -242,6 +249,10 @@ void bincode(Writer& w, const OutPoint& o)
     if (o.kind == OutPoint::Deposit) {
         w.bincode_bytes(o.txid.span()); // bitcoin::Txid serde = serialize_bytes
         w.u32(o.vout);
+    } else if (o.kind == OutPoint::UnsuccessfulWithdrawal) {
+        w.bincode_bytes(o.txid.span()); // M6id: serde-transparent bitcoin::Txid
+        w.u32(o.height);
+        w.u32(o.vout);
     } else {
         w.raw(o.txid); // [u8; 32] as a tuple
         w.u32(o.vout);
@@ -365,12 +376,13 @@ OutPoint de_outpoint(Reader& r)
 {
     OutPoint o;
     uint32_t tag = r.u32();
-    if (tag > 2) throw DecodeError("invalid OutPoint tag");
+    if (tag > 3) throw DecodeError("invalid OutPoint tag");
     o.kind = OutPoint::Kind(tag);
-    if (o.kind == OutPoint::Deposit) {
+    if (o.kind == OutPoint::Deposit || o.kind == OutPoint::UnsuccessfulWithdrawal) {
         Bytes b = r.bincode_bytes();
         if (b.size() != 32) throw DecodeError("invalid txid length");
         o.txid = Hash32::from_span(b);
+        if (o.kind == OutPoint::UnsuccessfulWithdrawal) o.height = r.u32();
     } else {
         o.txid = r.array<32>();
     }
@@ -476,9 +488,10 @@ OutPoint borsh_de_outpoint(Reader& r)
 {
     OutPoint o;
     uint8_t tag = r.u8();
-    if (tag > 2) throw DecodeError("invalid OutPoint tag");
+    if (tag > 3) throw DecodeError("invalid OutPoint tag");
     o.kind = OutPoint::Kind(tag);
     o.txid = r.array<32>();
+    if (o.kind == OutPoint::UnsuccessfulWithdrawal) o.height = r.u32();
     o.vout = r.u32();
     return o;
 }
@@ -636,7 +649,8 @@ std::optional<Hash32> coinbase_merkle_root(const Coinbase& cb)
     return bt::blake3(w.buf);
 }
 
-std::optional<Hash32> compute_merkle_root(const Coinbase& cb, const std::vector<FilledTransaction>& txs)
+// The CBMT commitment of the filled transactions (body.rs:154-212).
+static std::optional<Hash32> txs_commitment(const std::vector<FilledTransaction>& txs)
 {
     std::vector<ValueNode> leaves;
     for (auto& ft : txs) {
@@ -672,11 +686,37 @@ std::optional<Hash32> compute_merkle_root(const Coinbase& cb, const std::vector<
         },
         ValueNode{});
     if (!r) return std::nullopt;
+    return r->commitment;
+}
+
+std::optional<Hash32> compute_merkle_root(const Coinbase& cb, const std::vector<FilledTransaction>& txs)
+{
+    auto txc = txs_commitment(txs);
+    if (!txc) return std::nullopt;
     auto cbr = coinbase_merkle_root(cb);
     if (!cbr) return std::nullopt;
     Writer w;
     w.raw(*cbr);
-    w.raw(r->commitment);
+    w.raw(*txc);
+    return bt::blake3(w.buf);
+}
+
+std::optional<Hash32> compute_merkle_root(const Coinbase& cb, const std::vector<FilledTransaction>& txs,
+                                          const std::vector<Authorization>& authorizations)
+{
+    // HashComponents { coinbase_commitment, txs_commitment, authorizations_commitment }, the last being
+    // hash_with_scratch_buffer(&[Authorization]) = blake3(borsh: u32 count, then each authorization).
+    auto txc = txs_commitment(txs);
+    if (!txc) return std::nullopt;
+    auto cbr = coinbase_merkle_root(cb);
+    if (!cbr) return std::nullopt;
+    Writer a;
+    a.borsh_len(authorizations.size());
+    for (auto& x : authorizations) borsh(a, x);
+    Writer w;
+    w.raw(*cbr);
+    w.raw(*txc);
+    w.raw(bt::blake3(a.buf));
     return bt::blake3(w.buf);
 }
 

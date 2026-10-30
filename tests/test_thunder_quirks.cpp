@@ -517,7 +517,7 @@ TEST(duplicate_input_refused_by_block_and_mempool)
     CHECK(c.find_utxo(addr(k)).first.key() == dep.first.key());
 
     // The mempool: twice in one transaction, or already spent by one in it: refused; else let in.
-    std::map<std::array<uint8_t, 37>, Hash32> spent;
+    std::map<std::array<uint8_t, 41>, Hash32> spent;
     bool refused = false;
     try {
         mempool_check_inputs(spent, dup.transaction);

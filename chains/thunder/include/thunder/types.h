@@ -13,6 +13,7 @@
 #include <bt/frost.h>
 #include <bt/utreexo.h>
 
+#include <compare>
 #include <map>
 #include <optional>
 #include <string>
@@ -67,16 +68,30 @@ struct Output {
     bool operator==(const Output&) const = default;
 };
 
-/** transaction/outpoint.rs:270-290. Ord = variant index, then (txid bytes, vout). */
+/** transaction/outpoint.rs:270-290. Ord = variant index, then (txid bytes, vout); UnsuccessfulWithdrawal (v0.19,
+ *  ec56149) = (m6id, height, vout). */
 struct OutPoint {
-    enum Kind : uint8_t { Regular = 0, Coinbase = 1, Deposit = 2 };
+    enum Kind : uint8_t { Regular = 0, Coinbase = 1, Deposit = 2, UnsuccessfulWithdrawal = 3 };
     Kind kind = Regular;
-    Hash32 txid; // Txid / CoinbaseTxid / bitcoin Txid (internal byte order)
+    Hash32 txid; // Txid / CoinbaseTxid / bitcoin Txid / M6id (internal byte order)
     uint32_t vout = 0;
-    friend auto operator<=>(const OutPoint&, const OutPoint&) = default;
+    uint32_t height = 0; // UnsuccessfulWithdrawal: the sidechain height its outputs were recreated at; 0 otherwise
+    static OutPoint unsuccessful_withdrawal(const Hash32& m6id, uint32_t height, uint32_t vout)
+    {
+        return OutPoint{UnsuccessfulWithdrawal, m6id, vout, height};
+    }
+    friend std::strong_ordering operator<=>(const OutPoint& a, const OutPoint& b)
+    {
+        if (auto c = a.kind <=> b.kind; c != 0) return c;
+        if (auto c = a.txid <=> b.txid; c != 0) return c;
+        if (auto c = a.height <=> b.height; c != 0) return c; // equal (0) but for UnsuccessfulWithdrawal
+        return a.vout <=> b.vout;
+    }
     friend bool operator==(const OutPoint&, const OutPoint&) = default;
-    /** 37-byte borsh form, also the key of their utxos/stxos tables. */
-    std::array<uint8_t, 37> key() const;
+    /** The borsh form zero-padded to 41 bytes (v0.19 OutPointKey); in our tables only the first key_len() bytes, so
+     *  the keys of the first three variants are their 37-byte borsh form, as before. */
+    std::array<uint8_t, 41> key() const;
+    size_t key_len() const { return kind == UnsuccessfulWithdrawal ? 41 : 37; }
     std::string to_string() const;
 };
 
@@ -219,6 +234,9 @@ Transaction borsh_de_transaction(Reader& r);
 // ---------------------------------------------------------------- merkle
 /** block/body.rs:154-224. nullopt where theirs returns an error (block invalid). */
 std::optional<Hash32> compute_merkle_root(const Coinbase& cb, const std::vector<FilledTransaction>& txs);
+/** v0.19 (3a714ea): the root also commits to the authorizations, blake3(borsh(Vec<Authorization>)). */
+std::optional<Hash32> compute_merkle_root(const Coinbase& cb, const std::vector<FilledTransaction>& txs,
+                                          const std::vector<Authorization>& authorizations);
 /** coinbase.rs:85-91 */
 std::optional<Hash32> coinbase_merkle_root(const Coinbase& cb);
 std::optional<Hash32> outputs_merkle_root(const std::vector<Output>& outs);

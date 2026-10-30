@@ -3,7 +3,7 @@
   "stem": "thunder",
   "name": "Thunder",
   "hostApi": 1,
-  "networks": ["betanet", "regtest", "signet", "forknet"],
+  "networks": ["mainnet", "betanet", "regtest", "signet", "forknet"],
   "rpcPort": 6009,
   "p2pPort": 4009,
   "protocol": ["webuihost", "describeconfirmation", "webuievents", "webuichosenfile", "appserverproof"],

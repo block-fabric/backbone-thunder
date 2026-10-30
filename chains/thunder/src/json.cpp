@@ -32,6 +32,13 @@ UniValue outpoint(const OutPoint& o)
         return r;
     }
     UniValue inner = obj();
+    if (o.kind == OutPoint::UnsuccessfulWithdrawal) { // v0.19: { m6id (bitcoin txid text), height, vout }
+        inner.pushKV("m6id", bt::hex_encode_rev(o.txid.span()));
+        inner.pushKV("height", UniValue(uint64_t(o.height)));
+        inner.pushKV("vout", UniValue(uint64_t(o.vout)));
+        r.pushKV("UnsuccessfulWithdrawal", inner);
+        return r;
+    }
     inner.pushKV("txid", hash(o.txid));
     inner.pushKV("vout", UniValue(uint64_t(o.vout)));
     r.pushKV(o.kind == OutPoint::Regular ? "Regular" : "Coinbase", inner);
@@ -403,6 +410,15 @@ OutPoint parse_outpoint(const UniValue& v)
         auto vout = bt::parse_u64(s.substr(c + 1));
         if (!vout || *vout > UINT32_MAX) throw Error("invalid deposit outpoint", &v);
         o.vout = uint32_t(*vout);
+        return o;
+    }
+    if (k == "UnsuccessfulWithdrawal") {
+        o.kind = OutPoint::UnsuccessfulWithdrawal;
+        o.txid = parse_btc_hash(x["m6id"]);
+        uint64_t height = parse_u64(x["height"]), vout = parse_u64(x["vout"]);
+        if (height > UINT32_MAX || vout > UINT32_MAX) throw Error("out of range", &v);
+        o.height = uint32_t(height);
+        o.vout = uint32_t(vout);
         return o;
     }
     if (k != "Regular" && k != "Coinbase") throw Error("invalid OutPoint variant", &v);

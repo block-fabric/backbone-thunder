@@ -2,7 +2,7 @@
 
 Drop-in replacement clients for the eCash sidechains of the LayerTwo family, starting with
 **Thunder (slot 9)**: consensus-, P2P-, mainchain- and RPC-compatible with thunder-rust
-v0.18.2, in C++20. See `doc/DESIGN.md` (architecture, libraries, decisions),
+v0.19.1 on eCash mainnet and v0.18.2 on betanet, in C++20. See `doc/DESIGN.md` (architecture, libraries, decisions),
 `doc/thunder.md` (status, drop-in surface, reproduced quirks, deviations) and
 `doc/differential-tests.md` (what to run against their binaries on the test machine).
 
@@ -51,9 +51,12 @@ PKG_CONFIG_LIBDIR=$PWD/core/depends/built/mingw64/lib/pkgconfig cmake -S . -B bu
 
 Dependency tarballs are kept in `core/depends/sources` and checked against their SHA-256.
 
-## Run on betanet
+## Run
 
 ```
-thunder --headless --mainchain-grpc-url http://localhost:50051     # or an enforcer/backboned URL
+thunder --headless --mainchain-grpc-url http://localhost:50051                    # eCash mainnet (thunder-rust 0.19.1's rules), the default
+thunder --headless --network betanet --mainchain-grpc-url http://localhost:50051  # betanet (0.18.2's rules)
 thunder-cli getblockcount
 ```
+
+The mainchain is Backbone (`backboned -grpc`) or an eCash node with bip300301_enforcer. See `doc/thunder.md`, "Mainnet".

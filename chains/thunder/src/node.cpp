@@ -23,6 +23,8 @@ static int64_t now_s()
 
 static constexpr uint8_t T_PEERS = 80;         // known peers (host:port)
 static constexpr uint8_t T_MAIN_STAGE = 81;    // ancestor sync staging (height BE -> info)
+static constexpr uint8_t T_NETWORK = 86;       // the network name of the data folder's chain
+static constexpr uint8_t T_RULES = 87;         // the consensus rules it was synced under (Rules)
 
 Node::Node(NodeConfig cfg) : cfg_(std::move(cfg)) {}
 
@@ -34,8 +36,31 @@ bool Node::start(std::string& err)
         err = "cannot create " + cfg_.datadir;
         return false;
     }
+    state_.rules = cfg_.effective_rules();
     try {
         store_ = bt::kv::open_sqlite(cfg_.datadir + "/backbone-thunder.sqlite");
+        // One network per data folder: a folder that has a chain of another network is refused, not mixed. A chain
+        // synced before this mark existed is of a network that is not mainnet (none had it then).
+        {
+            Txn t(*store_);
+            const std::string net = net::network_name(cfg_.network);
+            auto mark = t.get(T_NETWORK, Bytes{});
+            std::string have = mark ? std::string(mark->begin(), mark->end())
+                                    : (state_.tip(t) && cfg_.network == net::Network::Mainnet ? std::string("pre-mainnet (betanet)") : std::string());
+            if (!have.empty() && have != net) {
+                err = cfg_.datadir + " holds Thunder " + have + " data; this node runs " + net + ": choose another --datadir";
+                return false;
+            }
+            const uint8_t r = uint8_t(state_.rules);
+            auto rmark = t.get(T_RULES, Bytes{});
+            if (rmark && (rmark->size() != 1 || (*rmark)[0] != r)) {
+                err = cfg_.datadir + " was synced under other consensus rules (--bt-consensus): choose another --datadir";
+                return false;
+            }
+            if (!mark) t.put(T_NETWORK, Bytes{}, Bytes(net.begin(), net.end()));
+            if (!rmark) t.put(T_RULES, Bytes{}, Bytes{r});
+            t.commit();
+        }
         if (cfg_.rebuild_side_tips) {
             Txn t(*store_);
             side_tips_.clear(t);
@@ -88,6 +113,9 @@ bool Node::start(std::string& err)
         LOG_INFO("P2P listening on %s (magic %s)", ep_->local_address().to_string().c_str(), bt::hex_encode(bt::ByteSpan(magic_.data(), 4)).c_str());
         if (cfg_.use_seeds && cfg_.network == net::Network::Betanet)
             for (const char* s : {"seed.beta.ecash.drivecha.in", "seed.beta.ecash.eu.com", "seed.beta.ecash.ninja"})
+                dial_targets_[std::string(s) + ":" + std::to_string(net::DEFAULT_PORT)] = 0;
+        if (cfg_.use_seeds && cfg_.network == net::Network::Mainnet) // v0.19.0 lib/net/mod.rs MAINNET_SEED_PEER_ADDRS
+            for (const char* s : {"seed.ecash.drivecha.in", "seed.ecash.eu.com", "seed.ecash.ninja"})
                 dial_targets_[std::string(s) + ":" + std::to_string(net::DEFAULT_PORT)] = 0;
         for (auto& p : cfg_.add_peers)
             if (bt::split_hostport(p, net::DEFAULT_PORT)) dial_targets_[p] = 0;
@@ -243,6 +271,25 @@ uint64_t Node::sidechain_wealth()
     Txn t(*store_);
     return state_.sidechain_wealth(t);
 }
+uint32_t Node::main_tip_height(const Txn& t) const
+{
+    // node/mod.rs (v0.19): archive.get_main_height(side_tips.get_mainchain_tip())
+    auto mt = side_tips_.mainchain_tip(t);
+    if (!mt) return 0;
+    auto mh = archive_.main_header(t, *mt);
+    if (!mh) throw StateError("NoMainHeaderInfo");
+    return mh->height;
+}
+
+bool Node::spendable_next_block(const OutPoint& op)
+{
+    std::lock_guard<std::recursive_mutex> l(mu_);
+    Txn t(*store_);
+    // rpc_server.rs (v0.19): spend height = tip + 1, main height = the mainchain tip's (0 if none)
+    auto h = state_.height(t);
+    return state_.input_mature(t, op, h ? *h + 1 : 0, main_tip_height(t));
+}
+
 bt::utreexo::MemForest Node::tip_accumulator()
 {
     std::lock_guard<std::recursive_mutex> l(mu_);
@@ -321,7 +368,7 @@ std::pair<std::vector<std::pair<AuthorizedTransaction, std::vector<Output>>>, ui
     Txn t(*store_);
     std::vector<std::pair<AuthorizedTransaction, std::vector<Output>>> r;
     uint64_t fee = 0;
-    std::set<std::array<uint8_t, 37>> spent;
+    std::set<std::array<uint8_t, 41>> spent;
     std::vector<AuthorizedTransaction> take;
     for (auto& [id, tx] : mempool_) {
         if (take.size() >= n) break;
@@ -338,7 +385,7 @@ std::pair<std::vector<std::pair<AuthorizedTransaction, std::vector<Output>>>, ui
         }
         uint64_t f;
         try {
-            f = state_.validate_transaction(t, tx);
+            f = state_.validate_transaction(t, tx, main_tip_height(t));
         } catch (const StateError&) {
             mempool_delete(txid);
             continue;
@@ -363,7 +410,7 @@ void Node::submit_transaction(AuthorizedTransaction& tx)
         auto p = acc.prove(targets);
         if (!p) throw StateError("Utreexo: cannot prove inputs");
         tx.transaction.proof = *p;
-        state_.validate_transaction(t, tx);
+        state_.validate_transaction(t, tx, main_tip_height(t));
         mempool_put(tx);
     }
     relay_tx(tx, std::nullopt);
@@ -406,8 +453,12 @@ bool Node::request_mainchain_ancestor_infos(const Hash32& main)
     Hash32 cur = main;
     uint64_t staged = 0;
     std::optional<uint32_t> lowest;
+    bool first_batch = true;
     for (;;) {
         if (!running_) return false;
+        if (!first_batch && cfg_.mainchain_sync_pause_ms)
+            for (unsigned w = 0; w < cfg_.mainchain_sync_pause_ms && running_; w += 50) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        first_batch = false;
         auto r = enforcer_->get_block_infos(cur, 999);
         if (!bt::enforcer::ok(r)) {
             LOG_WARN("GetBlockInfo %s: %s", bt::hex_encode_rev(cur.span()).c_str(), bt::enforcer::err(r).what().c_str());
@@ -498,7 +549,7 @@ void Node::mainchain_loop()
                 if (request_mainchain_ancestor_infos(mt) && sync_to_mainchain_tip(mt)) last_tip = mt;
             }
         }
-        for (int i = 0; i < 20 && running_; i++) std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        for (unsigned i = 0; i < cfg_.mainchain_poll_ms / 100 && running_; i++) std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 }
 
@@ -622,9 +673,27 @@ std::vector<Hash32> Node::main_ancestors(const Txn& t, const Hash32& from, const
 void Node::connect_tip_(Txn& t, const Header& h, const Body& b, const TwoWayPegData& d)
 {
     Hash32 bh = h.hash();
-    auto pre = state_.prevalidate(t, h, b);
-    state_.connect_prevalidated(t, h, b, pre);
-    state_.connect_2wpd(t, d);
+    if (state_.v019()) {
+        // net_task.rs connect_tip_ (v0.19): the 2WPD before the block's transactions, so that they can spend recreated
+        // outputs; then the transactions, the header, and the withdrawal bundle built after them
+        auto main_height = [&](const Hash32& m) {
+            auto mh = archive_.main_header(t, m);
+            if (!mh) throw StateError("NoMainHeaderInfo " + bt::hex_encode_rev(m.span()));
+            return mh->height;
+        };
+        std::vector<uint32_t> heights;
+        for (auto& [mh, _] : d.block_info) heights.push_back(main_height(mh));
+        const uint32_t prev_main_height = main_height(h.prev_main_hash);
+        state_.connect_2wpd(t, d, heights);
+        auto pre = state_.prevalidate(t, h, b, prev_main_height, State::CheckOpts{});
+        state_.connect_prevalidated(t, h, b, pre);
+        state_.connect_header(t, h);
+        state_.maybe_create_withdrawal_bundle(t);
+    } else {
+        auto pre = state_.prevalidate(t, h, b);
+        state_.connect_prevalidated(t, h, b, pre);
+        state_.connect_2wpd(t, d);
+    }
     auto acc = state_.accumulator(t);
     archive_.put_header(t, h);
     put_body_(t, bh, b);
@@ -663,8 +732,15 @@ void Node::disconnect_tip_(Txn& t)
         auto bi = archive_.main_block_info(t, *it);
         if (!bi.events.empty()) d.block_info.emplace_back(*it, bi);
     }
-    state_.disconnect_2wpd(t, d);
-    state_.disconnect_tip(t, th, tb);
+    if (state_.v019()) { // net_task.rs disconnect_tip_ (v0.19)
+        state_.disconnect_withdrawal_bundle_creation(t);
+        state_.disconnect_tip(t, th, tb); // the body
+        state_.disconnect_2wpd(t, d);
+        state_.disconnect_tip_header(t, th);
+    } else {
+        state_.disconnect_2wpd(t, d);
+        state_.disconnect_tip(t, th, tb);
+    }
     // restore the accumulator snapshot of the new tip (rustreexo has no undo)
     if (auto nt = state_.tip(t)) {
         auto acc = archive_.accumulator(t, *nt);
@@ -1037,7 +1113,7 @@ void Node::on_request(bt::quic::ConnId c, int64_t stream, Bytes payload)
         try {
             std::lock_guard<std::recursive_mutex> l(mu_);
             Txn t(*store_);
-            state_.validate_transaction(t, q.tx);
+            state_.validate_transaction(t, q.tx, main_tip_height(t));
         } catch (const std::exception&) {
             ok = false;
         }
@@ -1284,6 +1360,7 @@ void Node::net_loop()
                 if (nl.owns_lock()) cached_tip_info_ = our_tip_info();
             }
             q.heartbeat.tip_info = cached_tip_info_;
+            q.heartbeat.version = net::network_version(cfg_.network);
             std::vector<bt::quic::ConnId> targets;
             {
                 std::lock_guard<std::mutex> l(peers_mu_);

@@ -27,7 +27,7 @@ namespace {
 const char* WALLET_NAME = "main";
 /** The LayerTwo read that stands for knowing the wallet's addresses: what tells a caller which outputs are the wallet's. */
 const char* WALLET_READ = "get_wallet_addresses";
-const char* VERSION_TEXT = "0.1.0 (thunder 0.18.2 compatible)";
+const char* VERSION_TEXT = "0.2.0 (thunder 0.19.1 compatible on mainnet, 0.18.2 on betanet)";
 
 const UniValue NULLV;
 const UniValue& param(const UniValue& p, const std::string& key) { return p.isObject() ? p.find_value(key) : NULLV; }
@@ -48,6 +48,8 @@ uint64_t u64_of(const UniValue& v, const std::string& what)
     if (!n) throw HostError(bt::appui::HOST_INVALID_REQUEST, what + ": too large");
     return *n;
 }
+
+const char* derivation_name(bt::hd::Variant v) { return v == bt::hd::Variant::V0_19 ? "v0.19" : v == bt::hd::Variant::V0_18_0 ? "v0.18.0" : "v0.18.1"; }
 
 std::string coins(uint64_t sats) { return bt::appui::format_sats(sats) + " ECX"; }
 
@@ -222,7 +224,7 @@ struct AppLayer::Impl {
         s.pushKV("phraseKept", has && kept_phrase().has_value());
         s.pushKV("from", has ? store->get("phrase.from").value_or("outside") : "");
         s.pushKV("fingerprint", has ? seed_fingerprint() : "");
-        s.pushKV("derivation", wallet.variant() == bt::hd::Variant::V0_18_0 ? "v0.18.0" : "v0.18.1");
+        s.pushKV("derivation", derivation_name(wallet.variant()));
         return s;
     }
 
@@ -1332,7 +1334,7 @@ bool AppLayer::start(std::string& err)
         q.accept = "Save";
         q.kind = "phrase.save";
         if (!env.ask(q).accepted) throw HostError(bt::appui::HOST_CANCELLED, "Cancelled");
-        std::string content{"Thunder backup phrase (BIP-39, " + std::string{m.wallet.variant() == bt::hd::Variant::V0_18_0 ? "v0.18.0" : "v0.18.1"} +
+        std::string content{"Thunder backup phrase (BIP-39, " + std::string{derivation_name(m.wallet.variant())} +
                                                     " keys)\n" + *phrase + "\n"};
         const bt::appui::WipeOnExit wipe_content{content};
         try {

@@ -33,6 +33,9 @@ const char* to_string(BundleStatus s)
 
 static NodeHash nh(const Hash32& h) { return NodeHash::some(h); }
 
+/** An outpoint's key in our utxos/stxos tables: its borsh form (37 bytes; 41 for UnsuccessfulWithdrawal). */
+static ByteSpan kspan(const std::array<uint8_t, 41>& k) { return ByteSpan(k.data(), k[0] == OutPoint::UnsuccessfulWithdrawal ? 41 : 37); }
+
 // ------------------------------------------------------------------ AccumulatorDiff
 void AccumulatorDiff::insert(const NodeHash& h)
 {
@@ -239,7 +242,7 @@ std::optional<uint32_t> State::height(const Txn& t) const
 std::optional<Output> State::utxo(const Txn& t, const OutPoint& op) const
 {
     auto k = op.key();
-    auto v = t.get(T_UTXOS, ByteSpan(k.data(), k.size()));
+    auto v = t.get(T_UTXOS, kspan(k));
     if (!v) return std::nullopt;
     Reader r(*v);
     return de_output(r);
@@ -248,7 +251,7 @@ std::optional<Output> State::utxo(const Txn& t, const OutPoint& op) const
 std::optional<SpentOutput> State::stxo(const Txn& t, const OutPoint& op) const
 {
     auto k = op.key();
-    auto v = t.get(T_STXOS, ByteSpan(k.data(), k.size()));
+    auto v = t.get(T_STXOS, kspan(k));
     if (!v) return std::nullopt;
     Reader r(*v);
     return dec_spent(r);
@@ -259,7 +262,13 @@ static OutPoint op_from_key(ByteSpan k)
     OutPoint o;
     o.kind = OutPoint::Kind(k[0]);
     std::memcpy(o.txid.data(), k.data() + 1, 32);
-    o.vout = uint32_t(k[33]) | uint32_t(k[34]) << 8 | uint32_t(k[35]) << 16 | uint32_t(k[36]) << 24;
+    auto le32 = [&](size_t i) { return uint32_t(k[i]) | uint32_t(k[i + 1]) << 8 | uint32_t(k[i + 2]) << 16 | uint32_t(k[i + 3]) << 24; };
+    if (o.kind == OutPoint::UnsuccessfulWithdrawal && k.size() >= 41) {
+        o.height = le32(33);
+        o.vout = le32(37);
+    } else {
+        o.vout = le32(33);
+    }
     return o;
 }
 
@@ -409,17 +418,18 @@ static std::optional<std::pair<uint32_t, std::pair<Hash32, uint32_t>>> seq_last(
     return std::make_pair(seq, std::make_pair(Hash32::from_span(hb), h));
 }
 
-// mod.rs:503-547
+// mod.rs:503-547. v0.19 counts outputs recreated from unsuccessful bundles as inflows too (none exist under v0.18).
 uint64_t State::sidechain_wealth(const Txn& t) const
 {
     uint64_t dep_utxo = 0, dep_stxo = 0, wd_stxo = 0;
+    auto inflow = [](const OutPoint& op) { return op.kind == OutPoint::Deposit || op.kind == OutPoint::UnsuccessfulWithdrawal; };
     for (auto& [op, o] : utxos(t))
-        if (op.kind == OutPoint::Deposit) {
+        if (inflow(op)) {
             if (dep_utxo + o.get_value() < dep_utxo) throw StateError("AmountOverflow");
             dep_utxo += o.get_value();
         }
     for (auto& [op, s] : stxos(t)) {
-        if (op.kind == OutPoint::Deposit) {
+        if (inflow(op)) {
             if (dep_stxo + s.output.get_value() < dep_stxo) throw StateError("AmountOverflow");
             dep_stxo += s.output.get_value();
         }
@@ -458,7 +468,60 @@ uint64_t State::validate_filled(const FilledTransaction& ft)
     return in - out;
 }
 
-uint64_t State::validate_transaction(const Txn& t, const AuthorizedTransaction& tx) const
+// v0.19 mod.rs validate_tx_input_maturity
+void State::validate_input_maturity(const Txn& t, uint32_t main_height, const OutPoint& op) const
+{
+    if (op.kind == OutPoint::Coinbase) {
+        auto ch = coinbase_height(t, op.txid);
+        if (!ch) throw StateError("Db: coinbase height missing"); // DatabaseUnique::get
+        auto h = height(t);
+        uint32_t spend_height = h ? *h + 1 : 0;
+        if (spend_height < *ch || spend_height - *ch < COINBASE_MATURITY) throw StateError("ImmatureOutPoint: coinbase");
+    } else if (op.kind == OutPoint::Deposit) {
+        auto dh = deposit_main_height(t, op.txid);
+        if (!dh) throw StateError("Db: deposit mainchain height missing");
+        if (main_height < *dh || main_height - *dh < DEPOSIT_MATURITY) throw StateError("ImmatureOutPoint: deposit");
+    }
+}
+
+bool State::input_mature(const Txn& t, const OutPoint& op, uint32_t spend_height, uint32_t main_height) const
+{
+    if (!v019()) return true;
+    if (op.kind == OutPoint::Coinbase) {
+        auto ch = coinbase_height(t, op.txid);
+        return ch && spend_height >= *ch && spend_height - *ch >= COINBASE_MATURITY;
+    }
+    if (op.kind == OutPoint::Deposit) {
+        auto dh = deposit_main_height(t, op.txid);
+        return dh && main_height >= *dh && main_height - *dh >= DEPOSIT_MATURITY;
+    }
+    return true;
+}
+
+uint64_t State::validate_filled(const Txn& t, const FilledTransaction& ft, uint32_t main_height) const
+{
+    if (!v019()) return validate_filled(ft);
+    for (size_t i = 0; i < ft.tx->inputs.size(); i++) {
+        auto& [op, h] = ft.tx->inputs[i];
+        if (pointed_output_hash(op, ft.spent_utxos[i]) != h) throw StateError("UtxoHashMismatch");
+    }
+    uint64_t in = 0, out = 0;
+    for (size_t i = 0; i < ft.tx->inputs.size(); i++) {
+        validate_input_maturity(t, main_height, ft.tx->inputs[i].first); // withdrawal outputs spendable (ec56149)
+        uint64_t v = ft.spent_utxos[i].get_value();
+        if (in + v < in) throw StateError("AmountOverflow");
+        in += v;
+    }
+    for (auto& o : ft.tx->outputs) {
+        uint64_t v = o.get_value();
+        if (out + v < out) throw StateError("AmountOverflow");
+        out += v;
+    }
+    if (out > in) throw StateError("NotEnoughValueIn");
+    return in - out;
+}
+
+uint64_t State::validate_transaction(const Txn& t, const AuthorizedTransaction& tx, uint32_t main_height) const
 {
     FilledTransaction ft{&tx.transaction, {}};
     for (auto& [op, _] : tx.transaction.inputs) {
@@ -469,11 +532,11 @@ uint64_t State::validate_transaction(const Txn& t, const AuthorizedTransaction& 
     for (size_t i = 0; i < tx.authorizations.size() && i < ft.spent_utxos.size(); i++)
         if (address_from_vk(tx.authorizations[i].verifying_key) != ft.spent_utxos[i].address) throw StateError("WrongPubKeyForAddress");
     if (!verify_authorized_transaction(tx)) throw StateError("Authorization");
-    return validate_filled(ft);
+    return validate_filled(t, ft, main_height);
 }
 
 // ------------------------------------------------------------------ blocks (block.rs:17-196)
-PrevalidatedBlock State::prevalidate(const Txn& t, const Header& h, const Body& body, CheckOpts opts) const
+PrevalidatedBlock State::prevalidate(const Txn& t, const Header& h, const Body& body, uint32_t prev_main_height, CheckOpts opts) const
 {
     auto tip_hash = tip(t);
     if (h.prev_side_hash != tip_hash) throw StateError("InvalidHeader: PrevSideHash");
@@ -485,7 +548,7 @@ PrevalidatedBlock State::prevalidate(const Txn& t, const Header& h, const Body& 
     auto acc = accumulator(t);
     auto roots_before = acc.get_roots();
 
-    std::vector<std::array<uint8_t, 37>> all_input_keys;
+    std::vector<std::array<uint8_t, 41>> all_input_keys;
     std::vector<std::pair<bool, NodeHash>> diff_txs;
     PrevalidatedBlock pre;
     pre.next_height = next_height;
@@ -509,12 +572,12 @@ PrevalidatedBlock State::prevalidate(const Txn& t, const Header& h, const Body& 
         auto ok = acc.verify(tx.proof, spent_hashes);
         if (!ok) throw StateError("Utreexo error");
         if (!*ok) throw StateError("UtreexoProofFailed");
-        uint64_t fee = validate_filled(ft);
+        uint64_t fee = validate_filled(t, ft, prev_main_height);
         if (total_fees + fee < total_fees) throw StateError("AmountOverflow");
         total_fees += fee;
         pre.filled.push_back(std::move(ft));
     }
-    auto mr = compute_merkle_root(body.coinbase, pre.filled);
+    auto mr = v019() ? compute_merkle_root(body.coinbase, pre.filled, body.authorizations) : compute_merkle_root(body.coinbase, pre.filled);
     if (!mr) throw StateError("ComputeMerkleRoot");
     if (*mr != h.merkle_root) throw StateError("InvalidBody: merkle root");
     std::sort(all_input_keys.begin(), all_input_keys.end());
@@ -545,6 +608,14 @@ PrevalidatedBlock State::prevalidate(const Txn& t, const Header& h, const Body& 
     std::vector<NodeHash> ins, dels;
     pre.diff.split(ins, dels);
     if (auto e = acc.modify(ins, dels)) throw StateError("Utreexo: " + *e);
+    if (v019()) {
+        // block.rs (ec56149): the header roots commit to the accumulator after the bundle construction, a diff of its
+        // own applied after the block's
+        auto cd = simulate_withdrawal_bundle_construction(t, next_height, pre.filled, body.coinbase, cb_txid);
+        std::vector<NodeHash> cins, cdels;
+        cd.split(cins, cdels);
+        if (auto e = acc.modify(cins, cdels)) throw StateError("Utreexo: " + *e);
+    }
     pre.roots_after = acc.get_roots();
     if (opts.roots && pre.roots_after != h.roots) throw StateError("UtreexoRootsMismatch");
     pre.merkle_root = *mr;
@@ -571,7 +642,7 @@ void State::connect_prevalidated(Txn& t, const Header& h, const Body& body, cons
         auto k = OutPoint{OutPoint::Coinbase, cb_txid, vout}.key();
         Writer w;
         enc_output(w, body.coinbase.outputs[vout]);
-        t.put(T_UTXOS, ByteSpan(k.data(), k.size()), w.buf);
+        t.put(T_UTXOS, kspan(k), w.buf);
     }
     for (auto& ft : pre.filled) {
         Hash32 txid = ft.tx->txid();
@@ -580,22 +651,51 @@ void State::connect_prevalidated(Txn& t, const Header& h, const Body& body, cons
             auto u = utxo(t, op);
             if (!u) throw StateError("NoUtxo " + op.to_string());
             auto k = op.key();
-            t.del(T_UTXOS, ByteSpan(k.data(), k.size()));
+            t.del(T_UTXOS, kspan(k));
             Writer w;
             enc_spent(w, SpentOutput{*u, InPoint{InPoint::Regular, txid, vin}});
-            t.put(T_STXOS, ByteSpan(k.data(), k.size()), w.buf);
+            t.put(T_STXOS, kspan(k), w.buf);
         }
         for (uint32_t vout = 0; vout < ft.tx->outputs.size(); vout++) {
             auto k = OutPoint{OutPoint::Regular, txid, vout}.key();
             Writer w;
             enc_output(w, ft.tx->outputs[vout]);
-            t.put(T_UTXOS, ByteSpan(k.data(), k.size()), w.buf);
+            t.put(T_UTXOS, kspan(k), w.buf);
         }
     }
-    Hash32 bh = h.hash();
-    t.put(T_TIP, UNIT, bh.span());
-    t.put(T_HEIGHT, UNIT, u32le(pre.next_height));
+    if (!v019()) { // v0.19: connect_header, after the transactions
+        Hash32 bh = h.hash();
+        t.put(T_TIP, UNIT, bh.span());
+        t.put(T_HEIGHT, UNIT, u32le(pre.next_height));
+    }
     apply_diff(t, pre.diff);
+}
+
+// v0.19 block.rs connect_header
+void State::connect_header(Txn& t, const Header& h) const
+{
+    auto ht = height(t);
+    uint32_t next = ht ? *ht + 1 : 0;
+    t.put(T_TIP, UNIT, h.hash().span());
+    t.put(T_COINBASE_HEIGHT, h.coinbase_txid().span(), u32le(next));
+    t.put(T_HEIGHT, UNIT, u32le(next));
+}
+
+// v0.19 block.rs disconnect_tip_header
+void State::disconnect_tip_header(Txn& t, const Header& h) const
+{
+    t.del(T_COINBASE_HEIGHT, h.coinbase_txid().span());
+    auto ht = height(t);
+    if (!ht) throw StateError("Height should not be None", true);
+    if (!h.prev_side_hash && *ht == 0) {
+        t.del(T_TIP, UNIT);
+        t.del(T_HEIGHT, UNIT);
+    } else if (!h.prev_side_hash || *ht == 0) {
+        throw StateError("NoTip");
+    } else {
+        t.put(T_TIP, UNIT, h.prev_side_hash->span());
+        t.put(T_HEIGHT, UNIT, u32le(*ht - 1));
+    }
 }
 
 // block.rs:516-640
@@ -612,17 +712,17 @@ void State::disconnect_tip(Txn& t, const Header& h, const Body& body) const
             OutPoint op{OutPoint::Regular, txid, uint32_t(vout)};
             diff.remove(nh(pointed_output_hash(op, tx.outputs[size_t(vout)])));
             auto k = op.key();
-            if (!t.del(T_UTXOS, ByteSpan(k.data(), k.size()))) throw StateError("NoUtxo " + op.to_string());
+            if (!t.del(T_UTXOS, kspan(k))) throw StateError("NoUtxo " + op.to_string());
         }
         for (auto in = tx.inputs.rbegin(); in != tx.inputs.rend(); ++in) {
             auto k = in->first.key();
             auto s = stxo(t, in->first);
             if (!s) throw StateError("NoStxo " + in->first.to_string());
             diff.insert(nh(in->second));
-            t.del(T_STXOS, ByteSpan(k.data(), k.size()));
+            t.del(T_STXOS, kspan(k));
             Writer w;
             enc_output(w, s->output);
-            t.put(T_UTXOS, ByteSpan(k.data(), k.size()), w.buf);
+            t.put(T_UTXOS, kspan(k), w.buf);
         }
     }
     Hash32 cb_txid = h.coinbase_txid();
@@ -630,7 +730,11 @@ void State::disconnect_tip(Txn& t, const Header& h, const Body& body) const
         OutPoint op{OutPoint::Coinbase, cb_txid, uint32_t(vout)};
         diff.remove(nh(pointed_output_hash(op, body.coinbase.outputs[size_t(vout)])));
         auto k = op.key();
-        if (!t.del(T_UTXOS, ByteSpan(k.data(), k.size()))) throw StateError("NoUtxo " + op.to_string());
+        if (!t.del(T_UTXOS, kspan(k))) throw StateError("NoUtxo " + op.to_string());
+    }
+    if (v019()) { // disconnect_tip_body: the tip, height and coinbase height go in disconnect_tip_header
+        apply_diff(t, diff);
+        return;
     }
     // tip/height revert (block.rs:611-630)
     auto ht = height(t);
@@ -663,35 +767,48 @@ Output State::deposit_output(const bt::mainchain::Deposit& d)
     return o;
 }
 
-// two_way_peg_data.rs:23-114
-std::optional<WithdrawalBundle> State::collect_withdrawal_bundle(const Txn& t, uint32_t block_height) const
+// two_way_peg_data.rs:23-114 (v0.19: aggregate_withdrawal, bundle_from_aggregated)
+namespace {
+struct Agg {
+    bt::btc::Address addr;
+    uint64_t value = 0, main_fee = 0;
+    std::map<OutPoint, Output> utxos;
+};
+/** HashMap keyed by Address (Eq includes network/hrp); the order is fixed by the sort later. */
+void aggregate(std::vector<Agg>& aggs, const OutPoint& op, const Output& o)
 {
-    struct Agg {
-        bt::btc::Address addr;
-        uint64_t value = 0, main_fee = 0;
-        std::map<OutPoint, Output> utxos;
-    };
-    std::vector<Agg> aggs; // HashMap keyed by Address (Eq includes network/hrp)
-    for (auto& [op, o] : utxos(t)) {
-        if (o.content.kind != Content::Withdrawal) continue;
-        auto it = std::find_if(aggs.begin(), aggs.end(), [&](const Agg& a) { return a.addr == o.content.main_address; });
-        if (it == aggs.end()) {
-            aggs.push_back(Agg{o.content.main_address, 0, 0, {}});
-            it = std::prev(aggs.end());
-        }
-        if (it->value + o.content.value < it->value) throw StateError("AmountOverflow");
-        it->value += o.content.value;
-        if (it->main_fee + o.content.main_fee < it->main_fee) throw StateError("AmountOverflow");
-        it->main_fee += o.content.main_fee;
-        it->utxos[op] = o;
+    if (o.content.kind != Content::Withdrawal) return;
+    auto it = std::find_if(aggs.begin(), aggs.end(), [&](const Agg& a) { return a.addr == o.content.main_address; });
+    if (it == aggs.end()) {
+        aggs.push_back(Agg{o.content.main_address, 0, 0, {}});
+        it = std::prev(aggs.end());
     }
+    if (it->value + o.content.value < it->value) throw StateError("AmountOverflow");
+    it->value += o.content.value;
+    if (it->main_fee + o.content.main_fee < it->main_fee) throw StateError("AmountOverflow");
+    it->main_fee += o.content.main_fee;
+    it->utxos[op] = o;
+}
+/** Ord of AggregatedWithdrawal: v0.18 (main_fee, value, main_address); v0.19 (ec56149) main_fee / len(script) first,
+ *  compared as main_fee * other_len vs other_fee * len in u128, then the same tie-break. */
+int agg_cmp(const Agg& a, const Agg& b, bool v019)
+{
+    if (v019) {
+        unsigned __int128 lhs = (unsigned __int128)a.main_fee * b.addr.script_pubkey().size();
+        unsigned __int128 rhs = (unsigned __int128)b.main_fee * a.addr.script_pubkey().size();
+        if (lhs != rhs) return lhs < rhs ? -1 : 1;
+    }
+    if (a.main_fee != b.main_fee) return a.main_fee < b.main_fee ? -1 : 1;
+    if (a.value != b.value) return a.value < b.value ? -1 : 1;
+    if (a.addr < b.addr) return -1;
+    if (b.addr < a.addr) return 1;
+    return 0;
+}
+std::optional<WithdrawalBundle> bundle_from_aggregated(std::vector<Agg> aggs, uint32_t block_height, bool v019)
+{
     if (aggs.empty()) return std::nullopt;
-    // sort by Reverse((main_fee, value, main_address))
-    std::sort(aggs.begin(), aggs.end(), [](const Agg& a, const Agg& b) {
-        if (a.main_fee != b.main_fee) return a.main_fee > b.main_fee;
-        if (a.value != b.value) return a.value > b.value;
-        return b.addr < a.addr;
-    });
+    // sort_by_key(Reverse(a)): descending
+    std::sort(aggs.begin(), aggs.end(), [v019](const Agg& a, const Agg& b) { return agg_cmp(a, b, v019) > 0; });
     uint64_t fee = 0;
     std::map<OutPoint, Output> spend;
     std::vector<bt::btc::TxOut> outs;
@@ -716,6 +833,212 @@ std::optional<WithdrawalBundle> State::collect_withdrawal_bundle(const Txn& t, u
     if (!b) throw StateError("BundleTooHeavy");
     return b;
 }
+} // namespace
+
+std::optional<WithdrawalBundle> State::collect_withdrawal_bundle(const Txn& t, uint32_t block_height) const
+{
+    std::vector<Agg> aggs;
+    for (auto& [op, o] : utxos(t)) aggregate(aggs, op, o);
+    return bundle_from_aggregated(std::move(aggs), block_height, v019());
+}
+
+// ------------------------------------------------------------------ v0.19 bundle construction (ec56149)
+std::optional<uint32_t> State::coinbase_height(const Txn& t, const Hash32& txid) const
+{
+    auto v = t.get(T_COINBASE_HEIGHT, txid.span());
+    if (!v) return std::nullopt;
+    Reader r(*v);
+    return r.u32();
+}
+
+std::optional<uint32_t> State::deposit_main_height(const Txn& t, const Hash32& txid) const
+{
+    auto v = t.get(T_DEPOSIT_MAIN_HEIGHT, txid.span());
+    if (!v) return std::nullopt;
+    Reader r(*v);
+    return r.u32();
+}
+
+std::optional<RollBack<Hash32>> State::dropped_bundles(const Txn& t) const
+{
+    auto v = t.get(T_DROPPED_BUNDLES, UNIT);
+    if (!v) return std::nullopt;
+    Reader r(*v);
+    return dec_rollback<Hash32>(r, [](Reader& rd) { return rd.array<32>(); });
+}
+
+static void put_dropped(Txn& t, const RollBack<Hash32>& rb)
+{
+    Writer w;
+    enc_rollback(w, rb, [](Writer& ww, const Hash32& h) { ww.raw(h); });
+    t.put(State::T_DROPPED_BUNDLES, UNIT, w.buf);
+}
+
+bool State::withdrawal_bundle_creation_due(const Txn& t, uint32_t block_height) const
+{
+    auto lf = latest_failed_bundle(t);
+    uint32_t last_failure = lf ? lf->first : 0;
+    auto dr = dropped_bundles(t);
+    uint32_t last_drop = dr ? dr->latest().height : 0;
+    uint32_t last = std::max(last_failure, last_drop);
+    return uint32_t(block_height - last) >= WITHDRAWAL_BUNDLE_FAILURE_GAP && !pending_bundle_m6id(t);
+}
+
+AccumulatorDiff State::simulate_withdrawal_bundle_construction(const Txn& t, uint32_t block_height, const std::vector<FilledTransaction>& filled,
+                                                               const Coinbase& coinbase, const Hash32& coinbase_txid) const
+{
+    AccumulatorDiff d;
+    if (!withdrawal_bundle_creation_due(t, block_height)) return d;
+    // all withdrawal UTXOs, minus those the block's txs spend, plus those its txs and coinbase create
+    std::set<OutPoint> spent;
+    for (auto& ft : filled)
+        for (size_t i = 0; i < ft.tx->inputs.size(); i++)
+            if (ft.spent_utxos[i].content.kind == Content::Withdrawal) spent.insert(ft.tx->inputs[i].first);
+    std::vector<Agg> aggs;
+    for (auto& [op, o] : utxos(t))
+        if (!spent.count(op)) aggregate(aggs, op, o);
+    for (auto& ft : filled) {
+        Hash32 txid = ft.tx->txid();
+        for (uint32_t v = 0; v < ft.tx->outputs.size(); v++) aggregate(aggs, OutPoint{OutPoint::Regular, txid, v}, ft.tx->outputs[v]);
+    }
+    for (uint32_t v = 0; v < coinbase.outputs.size(); v++) aggregate(aggs, OutPoint{OutPoint::Coinbase, coinbase_txid, v}, coinbase.outputs[v]);
+    if (auto b = bundle_from_aggregated(std::move(aggs), block_height, true))
+        for (auto& [op, o] : b->spend_utxos) d.remove(nh(pointed_output_hash(op, o)));
+    return d;
+}
+
+void State::maybe_create_withdrawal_bundle(Txn& t) const
+{
+    auto ht = height(t);
+    if (!ht) throw StateError("NoTip");
+    uint32_t block_height = *ht;
+    if (!withdrawal_bundle_creation_due(t, block_height)) return;
+    auto b = collect_withdrawal_bundle(t, block_height);
+    if (!b) return;
+    Hash32 m6id = b->m6id();
+    AccumulatorDiff diff;
+    for (auto& [op, o] : b->spend_utxos) {
+        auto k = op.key();
+        if (!t.del(T_UTXOS, kspan(k))) throw StateError("NoUtxo " + op.to_string());
+        Writer w;
+        enc_spent(w, SpentOutput{o, InPoint{InPoint::Withdrawal, m6id, 0}});
+        t.put(T_STXOS, kspan(k), w.buf);
+        diff.remove(nh(pointed_output_hash(op, o)));
+    }
+    t.put(T_PENDING_BUNDLE, UNIT, m6id.span());
+    RollBack<BundleStatus> st;
+    if (auto existing = bundle(t, m6id)) {
+        st = existing->second;
+        if (!st.push(BundleStatus::Pending, block_height)) throw StateError("push pending", true);
+    } else {
+        st = RollBack<BundleStatus>::make(BundleStatus::Pending, block_height);
+    }
+    WithdrawalBundleInfo info;
+    info.kind = WithdrawalBundleInfo::Known;
+    info.bundle = std::move(*b);
+    put_bundle(t, m6id, info, st);
+    apply_diff(t, diff);
+}
+
+void State::disconnect_withdrawal_bundle_creation(Txn& t) const
+{
+    auto ht = height(t);
+    if (!ht) throw StateError("NoTip");
+    auto m6id = pending_bundle_m6id(t);
+    if (!m6id) return;
+    auto b = bundle(t, *m6id);
+    if (!b) throw StateError("PendingWithdrawalBundleUnknown");
+    // only a bundle created at this height, still Pending
+    if (b->second.latest().value != BundleStatus::Pending || b->second.latest().height != *ht) return;
+    if (b->first.kind != WithdrawalBundleInfo::Known) throw StateError("PendingWithdrawalBundleUnknown");
+    AccumulatorDiff diff;
+    auto& su = b->first.bundle.spend_utxos;
+    for (auto it = su.rbegin(); it != su.rend(); ++it) {
+        auto k = it->first.key();
+        if (!t.del(T_STXOS, kspan(k))) throw StateError("NoStxo " + it->first.to_string());
+        Writer w;
+        enc_output(w, it->second);
+        t.put(T_UTXOS, kspan(k), w.buf);
+        diff.insert(nh(pointed_output_hash(it->first, it->second)));
+    }
+    t.del(T_PENDING_BUNDLE, UNIT);
+    auto [rest, _] = b->second.pop();
+    if (rest) put_bundle(t, *m6id, b->first, *rest);
+    else t.del(T_BUNDLES, m6id_key(*m6id));
+    apply_diff(t, diff);
+}
+
+bool State::stale_pending_bundle_drop_due(const Txn& t, uint32_t block_height) const
+{
+    auto p = pending_bundle(t);
+    if (!p) return false;
+    return uint32_t(block_height - p->second) >= WITHDRAWAL_BUNDLE_FAILURE_GAP;
+}
+
+void State::recreate_bundle_outputs(Txn& t, AccumulatorDiff& diff, uint32_t block_height, const Hash32& m6id, const WithdrawalBundle& b) const
+{
+    uint32_t vout = 0;
+    for (auto& [_, o] : b.spend_utxos) { // BTreeMap order, index = vout
+        OutPoint r = OutPoint::unsuccessful_withdrawal(m6id, block_height, vout++);
+        Writer w;
+        enc_output(w, o);
+        t.put(T_UTXOS, kspan(r.key()), w.buf);
+        diff.insert(nh(pointed_output_hash(r, o)));
+    }
+}
+
+void State::delete_recreated_outputs(Txn& t, AccumulatorDiff& diff, uint32_t block_height, const Hash32& m6id, const WithdrawalBundle& b) const
+{
+    uint32_t vout = uint32_t(b.spend_utxos.size());
+    for (auto it = b.spend_utxos.rbegin(); it != b.spend_utxos.rend(); ++it) {
+        OutPoint r = OutPoint::unsuccessful_withdrawal(m6id, block_height, --vout);
+        if (!t.del(T_UTXOS, kspan(r.key()))) throw StateError("NoUtxo " + r.to_string());
+        diff.remove(nh(pointed_output_hash(r, it->second)));
+    }
+}
+
+void State::maybe_drop_stale_pending_bundle(Txn& t, AccumulatorDiff& diff, uint32_t block_height) const
+{
+    auto m6id = pending_bundle_m6id(t);
+    if (!m6id) return;
+    auto b = bundle(t, *m6id);
+    if (!b) throw StateError("Db: pending withdrawal bundle missing");
+    uint32_t pending_height = b->second.latest().height;
+    if (uint32_t(block_height - pending_height) < WITHDRAWAL_BUNDLE_FAILURE_GAP) return;
+    if (b->first.kind != WithdrawalBundleInfo::Known) throw StateError("PendingWithdrawalBundleUnknown");
+    recreate_bundle_outputs(t, diff, block_height, *m6id, b->first.bundle);
+    t.del(T_PENDING_BUNDLE, UNIT);
+    if (!b->second.push(BundleStatus::Dropped, block_height)) throw StateError("push dropped", true);
+    put_bundle(t, *m6id, b->first, b->second);
+    RollBack<Hash32> dr;
+    if (auto old = dropped_bundles(t)) {
+        dr = *old;
+        if (!dr.push(*m6id, block_height)) throw StateError("push dropped m6id", true);
+    } else {
+        dr = RollBack<Hash32>::make(*m6id, block_height);
+    }
+    put_dropped(t, dr);
+    // their warn: "Pending withdrawal bundle dropped: not submitted in time"
+}
+
+void State::disconnect_dropped_bundle(Txn& t, AccumulatorDiff& diff, uint32_t block_height) const
+{
+    auto dr = dropped_bundles(t);
+    if (!dr || dr->latest().height != block_height) return;
+    Hash32 m6id = dr->latest().value;
+    auto [prev, _] = dr->pop();
+    if (prev) put_dropped(t, *prev);
+    else t.del(T_DROPPED_BUNDLES, UNIT);
+    auto b = bundle(t, m6id);
+    if (!b) throw StateError("UnknownWithdrawalBundle");
+    auto [pst, latest] = b->second.pop();
+    if (latest.value != BundleStatus::Dropped || latest.height != block_height) throw StateError("assert dropped", true);
+    if (!pst || pst->latest().value != BundleStatus::Pending) throw StateError("assert pending before dropped", true);
+    if (b->first.kind != WithdrawalBundleInfo::Known) throw StateError("PendingWithdrawalBundleUnknown");
+    delete_recreated_outputs(t, diff, block_height, m6id, b->first.bundle);
+    t.put(T_PENDING_BUNDLE, UNIT, m6id.span());
+    put_bundle(t, m6id, b->first, *pst);
+}
 
 // two_way_peg_data.rs:116-280
 void State::connect_bundle_submitted(Txn& t, uint32_t block_height, AccumulatorDiff& diff, const Hash32& event_block, const Hash32& m6id) const
@@ -725,13 +1048,15 @@ void State::connect_bundle_submitted(Txn& t, uint32_t block_height, AccumulatorD
         auto b = bundle(t, m6id);
         if (!b) throw StateError("PendingWithdrawalBundleUnknown");
         if (b->first.kind != WithdrawalBundleInfo::Known) throw StateError("PendingWithdrawalBundleUnknown");
+        // v0.19: the outputs were spent when the bundle was built; only the status changes
+        if (!v019())
         for (auto& [op, o] : b->first.bundle.spend_utxos) {
             diff.remove(nh(pointed_output_hash(op, o)));
             auto k = op.key();
-            if (!t.del(T_UTXOS, ByteSpan(k.data(), k.size()))) throw StateError("NoUtxo " + op.to_string());
+            if (!t.del(T_UTXOS, kspan(k))) throw StateError("NoUtxo " + op.to_string());
             Writer w;
             enc_spent(w, SpentOutput{o, InPoint{InPoint::Withdrawal, m6id, 0}});
-            t.put(T_STXOS, ByteSpan(k.data(), k.size()), w.buf);
+            t.put(T_STXOS, kspan(k), w.buf);
         }
         if (b->second.latest().value != BundleStatus::Pending) throw StateError("assert Pending", true);
         if (!b->second.push(BundleStatus::Submitted, block_height)) throw StateError("push submitted", true);
@@ -782,20 +1107,23 @@ void State::connect_bundle_confirmed(Txn& t, uint32_t block_height, AccumulatorD
             auto k = op.key();
             Writer w;
             enc_spent(w, SpentOutput{o, InPoint{InPoint::Withdrawal, m6id, 0}});
-            t.put(T_STXOS, ByteSpan(k.data(), k.size()), w.buf);
+            t.put(T_STXOS, kspan(k), w.buf);
             diff.remove(nh(pointed_output_hash(op, o)));
         }
         t.clear(T_UTXOS);
         info.kind = WithdrawalBundleInfo::UnknownConfirmed;
         info.spend_utxos = std::move(all);
     } else if (info.kind == WithdrawalBundleInfo::Known) {
+        // v0.19: a failed or dropped bundle confirmed after all would pay the mainchain without removing the recreated
+        // claims: the block is invalid
+        if (v019() && st.latest().value == BundleStatus::SubmittedUnexpected) throw StateError("UnexpectedWithdrawalBundleConfirmed");
         if (st.latest().value == BundleStatus::SubmittedUnexpected) {
             for (auto& [op, o] : info.bundle.spend_utxos) {
                 auto k = op.key();
-                if (!t.del(T_UTXOS, ByteSpan(k.data(), k.size()))) throw StateError("UnexpectedWithdrawalBundleInsolvency");
+                if (!t.del(T_UTXOS, kspan(k))) throw StateError("UnexpectedWithdrawalBundleInsolvency");
                 Writer w;
                 enc_spent(w, SpentOutput{o, InPoint{InPoint::Withdrawal, m6id, 0}});
-                t.put(T_STXOS, ByteSpan(k.data(), k.size()), w.buf);
+                t.put(T_STXOS, kspan(k), w.buf);
                 diff.remove(nh(pointed_output_hash(op, o)));
             }
         }
@@ -814,12 +1142,15 @@ void State::connect_bundle_failed(Txn& t, uint32_t block_height, AccumulatorDiff
     if (st.latest().value != BundleStatus::Submitted && st.latest().value != BundleStatus::SubmittedUnexpected)
         throw StateError("assert Submitted", true);
     if (info.kind == WithdrawalBundleInfo::Known && st.latest().value != BundleStatus::SubmittedUnexpected) {
+        // v0.19: recreated at UnsuccessfulWithdrawal{m6id, height, i}; the originals stay spent by the bundle
+        if (v019()) recreate_bundle_outputs(t, diff, block_height, m6id, info.bundle);
+        else
         for (auto& [op, o] : info.bundle.spend_utxos) {
             auto k = op.key();
-            t.del(T_STXOS, ByteSpan(k.data(), k.size()));
+            t.del(T_STXOS, kspan(k));
             Writer w;
             enc_output(w, o);
-            t.put(T_UTXOS, ByteSpan(k.data(), k.size()), w.buf);
+            t.put(T_UTXOS, kspan(k), w.buf);
             diff.insert(nh(pointed_output_hash(op, o)));
         }
         auto lf = latest_failed_rollback(t);
@@ -837,22 +1168,28 @@ void State::connect_bundle_failed(Txn& t, uint32_t block_height, AccumulatorDiff
 }
 
 // two_way_peg_data.rs:560-667
-void State::connect_2wpd(Txn& t, const TwoWayPegData& d) const
+void State::connect_2wpd(Txn& t, const TwoWayPegData& d, const std::vector<uint32_t>& event_heights) const
 {
     auto ht = height(t);
-    if (!ht) throw StateError("NoTip");
-    uint32_t block_height = *ht;
+    if (!v019() && !ht) throw StateError("NoTip");
+    // v0.19: connected before the block, which is one above the tip (0 at genesis)
+    uint32_t block_height = v019() ? (ht ? *ht + 1 : 0) : *ht;
+    if (v019() && event_heights.size() != d.block_info.size()) throw StateError("2WPD without mainchain heights", true);
+    size_t bi_index = 0;
     AccumulatorDiff diff;
     std::optional<Hash32> latest_deposit_block, latest_bundle_event_block;
     for (auto& [event_block, bi] : d.block_info) {
+        const uint32_t event_height = v019() ? event_heights[bi_index] : 0;
+        bi_index++;
         for (auto& ev : bi.events) {
             if (auto dep = std::get_if<bt::mainchain::Deposit>(&ev)) {
+                if (v019()) t.put(T_DEPOSIT_MAIN_HEIGHT, dep->txid.span(), u32le(event_height));
                 OutPoint op{OutPoint::Deposit, dep->txid, dep->vout};
                 Output o = deposit_output(*dep);
                 auto k = op.key();
                 Writer w;
                 enc_output(w, o);
-                t.put(T_UTXOS, ByteSpan(k.data(), k.size()), w.buf);
+                t.put(T_UTXOS, kspan(k), w.buf);
                 diff.insert(nh(pointed_output_hash(op, o)));
                 latest_deposit_block = event_block;
             } else {
@@ -875,6 +1212,12 @@ void State::connect_2wpd(Txn& t, const TwoWayPegData& d) const
         auto l = seq_last(t, T_BUNDLE_EVENT_BLOCKS);
         uint32_t seq = l ? l->first + 1 : 0;
         t.put(T_BUNDLE_EVENT_BLOCKS, u32le(seq), enc_block_ref(*latest_bundle_event_block, block_height));
+    }
+    if (v019()) {
+        // a pending bundle not submitted in time: its outputs recreated, for this block's txs and the next bundle
+        maybe_drop_stale_pending_bundle(t, diff, block_height);
+        apply_diff(t, diff);
+        return;
     }
     auto lf = latest_failed_bundle(t);
     uint32_t last_failure_height = lf ? lf->first : 0;
@@ -911,14 +1254,16 @@ void State::disconnect_bundle_submitted(Txn& t, uint32_t block_height, Accumulat
     if (latest.value != BundleStatus::Submitted && latest.value != BundleStatus::SubmittedUnexpected) throw StateError("assert", true);
     if (latest.height != block_height) throw StateError("assert height", true);
     if (b->first.kind == WithdrawalBundleInfo::Known) {
-        if (rest && rest->latest().value == BundleStatus::Pending) {
+        if (v019() && rest && rest->latest().value == BundleStatus::Pending) {
+            t.put(T_PENDING_BUNDLE, UNIT, m6id.span()); // the outputs stay spent; only the marker comes back
+        } else if (rest && rest->latest().value == BundleStatus::Pending) {
             auto& su = b->first.bundle.spend_utxos;
             for (auto it = su.rbegin(); it != su.rend(); ++it) {
                 auto k = it->first.key();
-                if (!t.del(T_STXOS, ByteSpan(k.data(), k.size()))) throw StateError("NoStxo");
+                if (!t.del(T_STXOS, kspan(k))) throw StateError("NoStxo");
                 Writer w;
                 enc_output(w, it->second);
-                t.put(T_UTXOS, ByteSpan(k.data(), k.size()), w.buf);
+                t.put(T_UTXOS, kspan(k), w.buf);
                 diff.insert(nh(pointed_output_hash(it->first, it->second)));
             }
             t.put(T_PENDING_BUNDLE, UNIT, m6id.span());
@@ -942,13 +1287,14 @@ void State::disconnect_bundle_confirmed(Txn& t, uint32_t block_height, Accumulat
     auto pst = prev->latest().value;
     if (pst != BundleStatus::Submitted && pst != BundleStatus::SubmittedUnexpected) throw StateError("assert", true);
     if (info.kind == WithdrawalBundleInfo::Known) {
-        if (pst == BundleStatus::SubmittedUnexpected) {
+        // v0.19: confirming a known bundle never changed the UTXO set
+        if (!v019() && pst == BundleStatus::SubmittedUnexpected) {
             for (auto& [op, o] : info.bundle.spend_utxos) {
                 auto k = op.key();
                 Writer w;
                 enc_output(w, o);
-                t.put(T_UTXOS, ByteSpan(k.data(), k.size()), w.buf);
-                if (!t.del(T_STXOS, ByteSpan(k.data(), k.size()))) throw StateError("NoStxo");
+                t.put(T_UTXOS, kspan(k), w.buf);
+                if (!t.del(T_STXOS, kspan(k))) throw StateError("NoStxo");
                 diff.insert(nh(pointed_output_hash(op, o)));
             }
         }
@@ -957,8 +1303,8 @@ void State::disconnect_bundle_confirmed(Txn& t, uint32_t block_height, Accumulat
             auto k = op.key();
             Writer w;
             enc_output(w, o);
-            t.put(T_UTXOS, ByteSpan(k.data(), k.size()), w.buf);
-            if (!t.del(T_STXOS, ByteSpan(k.data(), k.size()))) throw StateError("NoStxo");
+            t.put(T_UTXOS, kspan(k), w.buf);
+            if (!t.del(T_STXOS, kspan(k))) throw StateError("NoStxo");
             diff.insert(nh(pointed_output_hash(op, o)));
         }
         info.kind = WithdrawalBundleInfo::Unknown;
@@ -981,12 +1327,14 @@ void State::disconnect_bundle_failed(Txn& t, uint32_t block_height, AccumulatorD
     if (pst != BundleStatus::Submitted && pst != BundleStatus::SubmittedUnexpected) throw StateError("assert", true);
     if (b->first.kind == WithdrawalBundleInfo::Known && pst != BundleStatus::SubmittedUnexpected) {
         auto& su = b->first.bundle.spend_utxos;
+        if (v019()) delete_recreated_outputs(t, diff, block_height, m6id, b->first.bundle);
+        else
         for (auto it = su.rbegin(); it != su.rend(); ++it) {
             auto k = it->first.key();
             Writer w;
             enc_spent(w, SpentOutput{it->second, InPoint{InPoint::Withdrawal, m6id, 0}});
-            t.put(T_STXOS, ByteSpan(k.data(), k.size()), w.buf);
-            if (!t.del(T_UTXOS, ByteSpan(k.data(), k.size()))) throw StateError("NoUtxo");
+            t.put(T_STXOS, kspan(k), w.buf);
+            if (!t.del(T_UTXOS, kspan(k))) throw StateError("NoUtxo");
             diff.remove(nh(pointed_output_hash(it->first, it->second)));
         }
         auto lf = latest_failed_rollback(t);
@@ -1007,14 +1355,17 @@ void State::disconnect_2wpd(Txn& t, const TwoWayPegData& d) const
     uint32_t block_height = *ht;
     AccumulatorDiff diff;
     std::optional<Hash32> latest_deposit_block, latest_bundle_event_block;
+    // v0.19: a drop is connected after the events, so undone before them
+    if (v019()) disconnect_dropped_bundle(t, diff, block_height);
     for (auto bit = d.block_info.rbegin(); bit != d.block_info.rend(); ++bit) {
         auto& [event_block, bi] = *bit;
         for (auto eit = bi.events.rbegin(); eit != bi.events.rend(); ++eit) {
             if (auto dep = std::get_if<bt::mainchain::Deposit>(&*eit)) {
+                if (v019()) t.del(T_DEPOSIT_MAIN_HEIGHT, dep->txid.span());
                 OutPoint op{OutPoint::Deposit, dep->txid, dep->vout};
                 Output o = deposit_output(*dep);
                 auto k = op.key();
-                if (!t.del(T_UTXOS, ByteSpan(k.data(), k.size()))) throw StateError("NoUtxo " + op.to_string());
+                if (!t.del(T_UTXOS, kspan(k))) throw StateError("NoUtxo " + op.to_string());
                 diff.remove(nh(pointed_output_hash(op, o)));
                 if (!latest_deposit_block) latest_deposit_block = event_block;
             } else {
@@ -1036,7 +1387,8 @@ void State::disconnect_2wpd(Txn& t, const TwoWayPegData& d) const
     }
     auto lf = latest_failed_bundle(t);
     uint32_t last_failure_height = lf ? lf->first : 0;
-    if (uint32_t(block_height - last_failure_height) >= WITHDRAWAL_BUNDLE_FAILURE_GAP) {
+    // v0.19: the bundle built at this height is undone by disconnect_withdrawal_bundle_creation
+    if (!v019() && uint32_t(block_height - last_failure_height) >= WITHDRAWAL_BUNDLE_FAILURE_GAP) {
         if (auto p = pending_bundle_m6id(t)) {
             auto b = bundle(t, *p);
             if (!b) throw StateError("PendingWithdrawalBundleUnknown");
@@ -1057,9 +1409,9 @@ void State::disconnect_2wpd(Txn& t, const TwoWayPegData& d) const
     apply_diff(t, diff);
 }
 
-void mempool_check_inputs(const std::map<std::array<uint8_t, 37>, Hash32>& spent, const Transaction& tx)
+void mempool_check_inputs(const std::map<std::array<uint8_t, 41>, Hash32>& spent, const Transaction& tx)
 {
-    std::set<std::array<uint8_t, 37>> own;
+    std::set<std::array<uint8_t, 41>> own;
     for (auto& [op, _] : tx.inputs) {
         auto k = op.key();
         if (spent.count(k) || !own.insert(k).second) throw StateError("UtxoDoubleSpent");
