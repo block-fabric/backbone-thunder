@@ -271,6 +271,16 @@ uint64_t Node::sidechain_wealth()
     Txn t(*store_);
     return state_.sidechain_wealth(t);
 }
+std::optional<std::pair<Hash32, uint32_t>> Node::mainchain_tip()
+{
+    std::lock_guard<std::recursive_mutex> l(mu_);
+    Txn t(*store_);
+    auto mt = side_tips_.mainchain_tip(t);
+    if (!mt) return std::nullopt;
+    auto mh = archive_.main_header(t, *mt);
+    if (!mh) return std::nullopt;
+    return std::make_pair(*mt, mh->height);
+}
 uint32_t Node::main_tip_height(const Txn& t) const
 {
     // node/mod.rs (v0.19): archive.get_main_height(side_tips.get_mainchain_tip())

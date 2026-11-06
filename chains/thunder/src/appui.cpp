@@ -27,7 +27,7 @@ namespace {
 const char* WALLET_NAME = "main";
 /** The LayerTwo read that stands for knowing the wallet's addresses: what tells a caller which outputs are the wallet's. */
 const char* WALLET_READ = "get_wallet_addresses";
-const char* VERSION_TEXT = "0.2.0 (thunder 0.19.1 compatible on mainnet, 0.18.2 on betanet)";
+const char* VERSION_TEXT = "0.2.1 (thunder 0.19.1 compatible on mainnet, 0.18.2 on betanet)";
 
 const UniValue NULLV;
 const UniValue& param(const UniValue& p, const std::string& key) { return p.isObject() ? p.find_value(key) : NULLV; }
@@ -130,8 +130,11 @@ struct AppLayer::Impl {
 
     std::optional<uint64_t> main_time(const Hash32& main) { return link ? link->block_time(main) : std::nullopt; }
 
+    // The mainchain block this node has followed to: its side tips' mainchain tip, not the block its own tip came with
+    // (blocks of this chain come only when merge-mined, so that one lags eCash's tip whenever no block was mined).
     std::optional<std::pair<Hash32, std::optional<uint32_t>>> followed()
     {
+        if (auto mt{node.mainchain_tip()}) return std::make_pair(mt->first, std::optional<uint32_t>{mt->second});
         auto tip{node.tip()};
         if (!tip) return std::nullopt;
         auto hd{node.header(*tip)};

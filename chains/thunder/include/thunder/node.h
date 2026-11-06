@@ -75,6 +75,9 @@ public:
     /** The height of our block last anchored on the mainchain that we know (bt::sidechain::anchored_height): the floor of
      *  the network's height in the app's sync status, display only. */
     std::optional<uint32_t> anchored_height();
+    /** The mainchain tip the side tips follow (side_tips.get_mainchain_tip) and its height: what this node has read of
+     *  the mainchain, whether or not a block of this chain came with it. */
+    std::optional<std::pair<Hash32, uint32_t>> mainchain_tip();
     std::optional<Hash32> block_hash_at(uint32_t height);
     std::optional<Header> header(const Hash32& h);
     std::optional<Body> body(const Hash32& h);
